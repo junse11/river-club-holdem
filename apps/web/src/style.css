@@ -35,6 +35,10 @@
 .felt-last-action strong{color:#ffdf78;font-weight:800}
 .player.has-bet{border-color:#cfa954}
 .player.highest-bet{border-color:#ffd25a;box-shadow:0 0 0 1.5px #ffd25a66,0 5px 14px #0005}
+.player.showdown-winner{border-color:#ffd25a;box-shadow:0 0 0 2.5px #ffd25a,0 0 24px #ffd25a66}
+.leaderboard-item{display:flex;flex-direction:column;gap:2px;padding:4px 0;border-bottom:1px solid #ffffff0d}
+.leaderboard-item p{margin:0}
+.bounty-chips-owned{font-size:11px;color:#ffd875;padding-left:14px}
 .seat-bet{font-style:normal;line-height:1.35;min-height:22px;color:#d7bb78;font-size:12px;overflow-wrap:anywhere;display:inline-flex;align-items:center;justify-content:center;gap:4px;margin-top:2px}
 .seat-bet.active-bet{background:#f0c45a;color:#132218;font-weight:700;padding:2px 10px;border-radius:999px;border:1.5px solid #fff1bf;box-shadow:0 3px 10px #0006;font-size:12.5px}
 .seat-bet.active-bet strong{font-weight:900;font-size:13.5px;color:#0b150f}

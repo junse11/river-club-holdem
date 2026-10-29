@@ -67,6 +67,7 @@ type InternalPlayer = {
   bet: number;
   committed: number;
   bountyUnits: number;
+  bountyLog: { victimNickname: string; units: number }[];
   lastActedAt: number;
   ready: boolean;
   folded: boolean;
@@ -149,7 +150,7 @@ export class LocalPokerTable {
     const used = new Set(this.players.map(p => p.seat));
     while (used.has(seat)) seat++;
     this.players.push({
-      id, nickname: nickname.trim(), seat, stack: buyin, bet: 0, committed: 0, bountyUnits: 0,
+      id, nickname: nickname.trim(), seat, stack: buyin, bet: 0, committed: 0, bountyUnits: 0, bountyLog: [],
       lastActedAt: -1, ready: false, folded: false, inHand: false, leaving: false,
       showdown: false, position: 'BTN', cards: [],
     });
@@ -347,6 +348,10 @@ export class LocalPokerTable {
       return;
     }
     if (capable.length <= 1) {
+      if (this.street === 'RIVER') {
+        this.settle();
+        return;
+      }
       for (const p of this.players) {
         p.bet = 0;
         p.lastActedAt = -1;
@@ -354,7 +359,7 @@ export class LocalPokerTable {
       this.currentBet = 0;
       this.actor = -1;
       this.deadline = 0;
-      this.runoutAt = Date.now() + 1150;
+      this.runoutAt = Date.now() + 3000;
       return;
     }
     if (this.street === 'RIVER') {
@@ -369,6 +374,9 @@ export class LocalPokerTable {
   settle(): void {
     if (!this.running()) return;
     this.runoutAt = 0;
+    const aliveAtEnd = this.players.filter(p => p.inHand && !p.folded);
+    const isForcedShowdown = aliveAtEnd.length >= 2;
+    const showdownWinners = new Set<string>();
     const lastPotWinners = new Map<string, InternalPlayer[]>();
     const payouts: { nickname: string; amount: number; rank: string }[] = [];
     const levels = [...new Set(this.players.filter(p => p.committed > 0).map(p => p.committed))].sort((a, b) => a - b);
@@ -388,6 +396,9 @@ export class LocalPokerTable {
       const winners = eligible
         .filter(p => eligible.length === 1 || evaluateHand([...this.board, ...p.cards]) === best)
         .sort((a, b) => ((a.seat - this.button + 5) % 6) - ((b.seat - this.button + 5) % 6));
+      if (isForcedShowdown && eligible.length >= 2) {
+        for (const w of winners) showdownWinners.add(w.id);
+      }
       for (const c of contributors) lastPotWinners.set(c.id, winners);
       winners.forEach((p, i) => {
         const won = Math.floor(pot / winners.length) + (i < pot % winners.length ? 1 : 0);
@@ -396,7 +407,9 @@ export class LocalPokerTable {
       });
     }
     const winnerNames = [...new Set(payouts.filter(p => p.rank !== 'Uncalled bet').map(p => p.nickname))];
-    this.result = winnerNames.length ? `${winnerNames.join(' · ')} 승리 · 지급 내역은 핸드 리뷰에서 확인` : '';
+    this.result = winnerNames.length
+      ? `${winnerNames.join(' · ')} 승리${isForcedShowdown ? ' (승자 핸드 강제 쇼다운)' : ' (폴드 승리 · 쇼다운 없음)'}`
+      : '';
     const awards: BountyAward[] = [];
     for (const victim of this.players) {
       if (victim.inHand && !victim.leaving && !victim.folded && victim.stack === 0) {
@@ -405,6 +418,9 @@ export class LocalPokerTable {
           const share = Math.floor(BOUNTY_UNITS / killers.length);
           const recipients = killers.map(k => {
             k.bountyUnits += share;
+            const existingBounty = k.bountyLog.find(b => b.victimNickname === victim.nickname);
+            if (existingBounty) existingBounty.units += share;
+            else k.bountyLog.push({ victimNickname: victim.nickname, units: share });
             return { id: k.id, nickname: k.nickname, units: share, amount: share / BOUNTY_UNITS };
           });
           awards.push({ victimId: victim.id, victimNickname: victim.nickname, recipients });
@@ -413,7 +429,12 @@ export class LocalPokerTable {
     }
     this.bountyAwards = awards;
     this.resetPending = awards.length > 0;
-    if (this.resetPending) this.result += ' · 바운티 획득! 다음 핸드 전원 100BB 리셋';
+    if (this.resetPending) {
+      const awardSummary = awards
+        .map(a => `🎯 ${a.victimNickname}의 바운티 칩 → ${a.recipients.map(r => r.nickname).join(', ')} 획득`)
+        .join(' · ');
+      this.result += ` · ${awardSummary} · 다음 핸드 전원 100BB 리셋`;
+    }
     this.history.push({
       hand: this.hand,
       board: [...this.board],
@@ -425,7 +446,7 @@ export class LocalPokerTable {
     for (const p of this.players) {
       p.bet = 0;
       p.committed = 0;
-      p.showdown = false;
+      p.showdown = isForcedShowdown && showdownWinners.has(p.id);
     }
     this.street = 'SETTLED';
     this.actor = -1;
@@ -478,7 +499,7 @@ export class LocalPokerTable {
           this.dealNextStreet();
           this.actor = -1;
           this.deadline = 0;
-          this.runoutAt = now + 1150;
+          this.runoutAt = now + 3000;
         }
         this.version++;
         return true;
@@ -554,7 +575,7 @@ export class LocalPokerTable {
       minRaiseTo: this.currentBet + this.lastRaise,
       pot: this.players.reduce((s, p) => s + p.committed, 0),
       actor: this.actor,
-      deadline: this.deadline,
+      deadline: this.deadline > 0 ? this.deadline : this.runoutAt,
       result: this.result,
       resetPending: this.resetPending,
       bountyAwards: this.bountyAwards,
@@ -569,6 +590,7 @@ export class LocalPokerTable {
         stack: p.stack,
         bountyUnits: p.bountyUnits,
         bounty: p.bountyUnits / BOUNTY_UNITS,
+        bountyVictims: p.bountyLog.map(b => ({ nickname: b.victimNickname, amount: b.units / BOUNTY_UNITS })),
         bet: p.bet,
         ready: p.ready,
         folded: p.folded,

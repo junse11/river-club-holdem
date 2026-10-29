@@ -1,5 +1,5 @@
 export type User = { id: string; nickname: string };
-export type Player = User & { seat: number; stack: number; bounty: number; bountyUnits: number; bet: number; ready: boolean; folded: boolean; showdown?: boolean; position: string; cards: string[]; cardCount: number };
+export type Player = User & { seat: number; stack: number; bounty: number; bountyUnits: number; bountyVictims?: { nickname: string; amount: number }[]; bet: number; ready: boolean; folded: boolean; showdown?: boolean; position: string; cards: string[]; cardCount: number };
 export type BountyAward = { victimId: string; victimNickname: string; recipients: { id: string; nickname: string; units: number; amount: number }[] };
 export type ChatMessage = { id: string; userId: string; nickname: string; text: string; time: number };
 export type Table = { code: string; name: string; host: string; version: number; hand: number; street: string; board: string[]; sb: number; bb: number; currentBet: number; minRaiseTo: number; pot: number; actor: number; deadline: number; result: string; resetPending: boolean; bountyAwards: BountyAward[]; players: Player[]; allowedActions: string[]; pendingBlinds: number[]; log: { street?: string; nickname: string; action: string; amountTo: number }[]; chat?: ChatMessage[] };

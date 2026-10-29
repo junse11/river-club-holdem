@@ -12,8 +12,8 @@ export function PokerTableView({ table, userId, now, money }: { table: Table; us
     : undefined;
   return <>
     <div className="table-hud" aria-label="게임 진행 상태">
-      <div className="turn-summary"><span>{table.street} · HAND #{table.hand}</span><strong>{playing ? (actor ? `${actor.nickname}님의 차례` : `🔥 올인 쇼다운 · ${table.street} 오픈 중…`) : table.resetPending ? '바운티 정산 · 100BB 리셋 예정' : table.street === 'SETTLED' ? '핸드 정산 완료 (4초 후 다음 핸드)' : '플레이어 준비 중'}</strong></div>
-      <div className={`turn-clock ${playing && actor && seconds <= 10 ? 'urgent' : ''}`} role="timer" aria-label="남은 행동 시간">{playing ? (actor ? <><b>{seconds}</b><span>초 남음</span></> : <span>올인 오픈</span>) : <span>대기 중</span>}</div>
+      <div className="turn-summary"><span>{table.street} · HAND #{table.hand}</span><strong>{playing ? (actor ? `${actor.nickname}님의 차례` : `🔥 올인 쇼다운 · 3초 간격으로 ${table.street} 오픈 중…`) : table.resetPending ? '바운티 정산 · 100BB 리셋 예정' : table.street === 'SETTLED' ? '핸드 정산 완료 (4초 후 다음 핸드)' : '플레이어 준비 중'}</strong></div>
+      <div className={`turn-clock ${playing && actor && seconds <= 10 ? 'urgent' : ''}`} role="timer" aria-label="남은 행동 시간">{playing ? (actor ? <><b>{seconds}</b><span>초 남음</span></> : <><b>{Math.max(1, seconds)}</b><span>초 · 오픈</span></>) : <span>대기 중</span>}</div>
     </div>
     <div className="poker-table" aria-label="6인 포커 테이블">
       <div className="felt">
@@ -37,15 +37,21 @@ export function PokerTableView({ table, userId, now, money }: { table: Table; us
         const isAllIn = Boolean(p && p.stack === 0 && playing && !p.folded);
         const hasBet = Boolean(p && p.bet > 0);
         const isTopBet = Boolean(playing && p && table.currentBet > 0 && p.bet === table.currentBet);
-        return <div key={seat} data-seat={seat} className={`player seat-${relative} ${p?.id === userId ? 'self' : ''} ${p?.seat === table.actor ? 'turn' : ''} ${p?.folded && playing ? 'folded' : ''} ${hasBet ? 'has-bet' : ''} ${isTopBet ? 'highest-bet' : ''}`}>
+        const isShowdownWinner = Boolean(table.street === 'SETTLED' && p?.showdown);
+        const bountyVictimsText = p?.bountyVictims?.length
+          ? p.bountyVictims.map(v => v.amount === 1 ? `${v.nickname}` : `${v.nickname}×${Number(v.amount.toFixed(2))}`).join(', ')
+          : '';
+        return <div key={seat} data-seat={seat} className={`player seat-${relative} ${p?.id === userId ? 'self' : ''} ${p?.seat === table.actor ? 'turn' : ''} ${p?.folded && playing ? 'folded' : ''} ${hasBet ? 'has-bet' : ''} ${isTopBet ? 'highest-bet' : ''} ${isShowdownWinner ? 'showdown-winner' : ''}`}>
           {p ? <>
             {latestChat && <div className="seat-chat-bubble" title={latestChat.text}>💬 {latestChat.text}</div>}
             <div className="hole" aria-label={p.id === userId ? '내 홀 카드' : `${p.nickname} 홀 카드`}>{Array.from({ length: p.cardCount }, (_, i) => <Card key={i} value={p.cards[i]}/>)}</div>
             <span className={`pos-badge ${posClass}`} aria-label={`포지션 ${p.position}`}>{p.position}{p.ready && !playing ? ' ✓' : ''}</span>
             <b className="player-name" title={p.nickname}>{p.id === table.host ? '♛ ' : ''}{p.nickname}{p.id === userId ? ' (나)' : ''}</b>
             <span className="player-stack">{money(p.stack)}</span>
-            <small className="bounty-score">🎯 {Number(p.bounty.toFixed(3))} 바운티{p.folded && playing ? ' · FOLD' : ''}{table.street === 'SETTLED' && p.cardCount > 0 ? (p.showdown ? ' · 🃏 공개' : ' · 🔒 비공개') : ''}</small>
-            {isAllIn ? (
+            <small className="bounty-score">🎯 {Number(p.bounty.toFixed(3))} 바운티{bountyVictimsText ? ` (${bountyVictimsText} 칩)` : ''}{p.folded && playing ? ' · FOLD' : ''}</small>
+            {isShowdownWinner ? (
+              <em className="seat-bet active-bet top-bet">🏆 승자 쇼다운</em>
+            ) : isAllIn ? (
               <em className="seat-bet allin-bet">🔥 ALL-IN{p.bet > 0 ? <> <strong>{money(p.bet)}</strong></> : ''}</em>
             ) : hasBet ? (
               <em className={`seat-bet active-bet ${isTopBet ? 'top-bet' : ''}`}>🪙 베팅 <strong>{money(p.bet)}</strong></em>

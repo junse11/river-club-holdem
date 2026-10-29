@@ -1,4 +1,3 @@
-import Peer, { DataConnection } from 'peerjs';
 import type { BountyAward, ChatMessage, InvitationInfo, Player, Review, Table, User } from './types';
 
 function uuid(): string {
@@ -132,9 +131,9 @@ export class LocalPokerTable {
       players: this.players,
       archivedPlayers: this.archivedPlayers,
       board: this.board,
-      log: this.log,
-      chatLog: this.chatLog,
-      history: this.history,
+      log: this.log.slice(-40),
+      chatLog: this.chatLog.slice(-30),
+      history: this.history.slice(-10),
       deck: this.deck,
       pending: [...this.pending],
       sb: this.sb,
@@ -762,59 +761,434 @@ export class LocalPokerTable {
   }
 }
 
-// --- P2P WebRTC (PeerJS) + BroadcastChannel Serverless Coordinator ---
+// --- Cloud MQTT-over-WSS + BroadcastChannel Serverless Coordinator ---
 type RpcRequest = { id: string; userId: string; nickname: string; path: string; body?: unknown };
 type RpcResponse = { id: string; ok: boolean; data?: unknown; error?: string };
 
 const STORAGE_TABLES_KEY = 'river:p2p:tables:v1';
 const STORAGE_SNAPSHOTS_KEY = 'river:p2p:snapshots:v1';
+const MQTT_BROKERS = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://broker.hivemq.com:8884/mqtt',
+];
+
+function encodeVarLength(len: number): Uint8Array {
+  const out: number[] = [];
+  do {
+    let digit = len % 128;
+    len = Math.floor(len / 128);
+    if (len > 0) digit |= 128;
+    out.push(digit);
+  } while (len > 0);
+  return new Uint8Array(out);
+}
+
+function encodeUtf8(str: string): Uint8Array {
+  const bytes = new TextEncoder().encode(str);
+  const out = new Uint8Array(2 + bytes.length);
+  out[0] = (bytes.length >> 8) & 0xff;
+  out[1] = bytes.length & 0xff;
+  out.set(bytes, 2);
+  return out;
+}
+
+function concatBytes(...arrays: Uint8Array[]): Uint8Array {
+  const total = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const a of arrays) {
+    out.set(a, offset);
+    offset += a.length;
+  }
+  return out;
+}
+
+class MqttSocketConn {
+  private ws: WebSocket | null = null;
+  private rxBuffer: Uint8Array = new Uint8Array(0);
+  private connected = false;
+  private subscribedTopics = new Set<string>();
+  private pendingPublishes = new Map<string, { payloadStr: string; retain: boolean }>();
+  private pktId = 1;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private url: string,
+    private clientId: string,
+    private onMessage: (topic: string, payload: string) => void
+  ) {
+    this.connect();
+  }
+
+  connect(): void {
+    if (typeof WebSocket === 'undefined') return;
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+    try {
+      const ws = new WebSocket(this.url, 'mqtt');
+      ws.binaryType = 'arraybuffer';
+      this.ws = ws;
+      ws.onopen = () => {
+        this.rxBuffer = new Uint8Array(0);
+        const proto = encodeUtf8('MQTT');
+        const flagsAndKeepalive = new Uint8Array([4, 2, 0, 45]);
+        const cid = encodeUtf8(this.clientId);
+        const body = concatBytes(proto, flagsAndKeepalive, cid);
+        this.sendRaw(concatBytes(new Uint8Array([0x10]), encodeVarLength(body.length), body));
+        if (this.pingTimer) clearInterval(this.pingTimer);
+        this.pingTimer = setInterval(() => {
+          if (this.connected) this.sendRaw(new Uint8Array([0xc0, 0x00]));
+        }, 25000);
+      };
+      ws.onmessage = ev => {
+        if (!(ev.data instanceof ArrayBuffer)) return;
+        this.rxBuffer = concatBytes(this.rxBuffer, new Uint8Array(ev.data));
+        this.parsePackets();
+      };
+      ws.onclose = () => {
+        this.connected = false;
+        this.scheduleReconnect();
+      };
+      ws.onerror = () => {
+        this.connected = false;
+        try { ws.close(); } catch {}
+      };
+    } catch {
+      this.scheduleReconnect();
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, 1500);
+  }
+
+  private sendRaw(pkt: Uint8Array): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try { this.ws.send(pkt); } catch {}
+    }
+  }
+
+  private sendSubscribe(topic: string): void {
+    const pid = (this.pktId++ & 0x7fff) || 1;
+    const pidBytes = new Uint8Array([(pid >> 8) & 0xff, pid & 0xff]);
+    const tBytes = encodeUtf8(topic);
+    const body = concatBytes(pidBytes, tBytes, new Uint8Array([0x00]));
+    this.sendRaw(concatBytes(new Uint8Array([0x82]), encodeVarLength(body.length), body));
+  }
+
+  private sendPublishNow(topic: string, payloadStr: string, retain: boolean): void {
+    const tBytes = encodeUtf8(topic);
+    const pBytes = new TextEncoder().encode(payloadStr);
+    const rem = encodeVarLength(tBytes.length + pBytes.length);
+    const header = new Uint8Array([retain ? 0x31 : 0x30]);
+    this.sendRaw(concatBytes(header, rem, tBytes, pBytes));
+  }
+
+  subscribe(topic: string): void {
+    this.subscribedTopics.add(topic);
+    if (this.connected) {
+      this.sendSubscribe(topic);
+    } else {
+      this.connect();
+    }
+  }
+
+  publish(topic: string, payloadStr: string, retain = true): void {
+    if (this.connected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.sendPublishNow(topic, payloadStr, retain);
+    } else {
+      this.pendingPublishes.set(topic, { payloadStr, retain });
+      this.connect();
+    }
+  }
+
+  private parsePackets(): void {
+    let offset = 0;
+    while (offset + 2 <= this.rxBuffer.length) {
+      const first = this.rxBuffer[offset];
+      const type = first >> 4;
+      const flags = first & 0x0f;
+      let multiplier = 1;
+      let value = 0;
+      let idx = offset + 1;
+      let complete = false;
+      while (idx < this.rxBuffer.length) {
+        const encodedByte = this.rxBuffer[idx++];
+        value += (encodedByte & 127) * multiplier;
+        if ((encodedByte & 128) === 0) {
+          complete = true;
+          break;
+        }
+        multiplier *= 128;
+      }
+      if (!complete || idx + value > this.rxBuffer.length) break;
+      const pkt = this.rxBuffer.subarray(idx, idx + value);
+      offset = idx + value;
+      if (type === 2) {
+        // CONNACK received
+        this.connected = true;
+        for (const t of this.subscribedTopics) {
+          this.sendSubscribe(t);
+        }
+        for (const [topic, item] of this.pendingPublishes.entries()) {
+          this.sendPublishNow(topic, item.payloadStr, item.retain);
+        }
+        this.pendingPublishes.clear();
+      } else if (type === 3 && pkt.length >= 2) {
+        const topicLen = (pkt[0] << 8) | pkt[1];
+        if (2 + topicLen <= pkt.length) {
+          const topic = new TextDecoder().decode(pkt.subarray(2, 2 + topicLen));
+          const qos = (flags >> 1) & 0x03;
+          const payloadStart = 2 + topicLen + (qos > 0 ? 2 : 0);
+          if (payloadStart <= pkt.length) {
+            const payload = new TextDecoder().decode(pkt.subarray(payloadStart));
+            this.onMessage(topic, payload);
+          }
+        }
+      }
+    }
+    if (offset > 0) {
+      this.rxBuffer = this.rxBuffer.subarray(offset);
+    }
+  }
+}
 
 class ServerlessCoordinator {
   private hostedTables = new Map<string, LocalPokerTable>();
   private savedSnapshots = new Map<string, { table: Table; history: Review[]; updatedAt: number }>();
-  private hostPeers = new Map<string, Peer>();
-  private hostPeerRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private connUsers = new Map<DataConnection, string>();
-  private clientConns = new Map<string, DataConnection>();
-  private clientConnPromises = new Map<string, Promise<DataConnection>>();
-  private clientPeer: Peer | null = null;
-  private clientPeerPromise: Promise<Peer> | null = null;
-  private remoteRooms = new Set<string>();
-  private pendingRpc = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private mqttConns: MqttSocketConn[] = [];
+  private instanceId = `rc-${uuid().slice(0, 8)}`;
+  private subscribedRooms = new Set<string>();
+  private roomLoadWaiters = new Map<string, Set<() => void>>();
   private updateListeners = new Set<(table?: Table) => void>();
   private bc: BroadcastChannel | null = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('river-club-p2p') : null;
 
   constructor() {
     this.loadPersistedState();
+    for (let i = 0; i < MQTT_BROKERS.length; i++) {
+      this.mqttConns.push(
+        new MqttSocketConn(MQTT_BROKERS[i], `${this.instanceId}-${i}`, (topic, payload) => {
+          this.handleMqttMessage(topic, payload);
+        })
+      );
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          this.mqttConns.forEach(c => c.connect());
+          for (const code of this.subscribedRooms) {
+            this.subscribeRoomCloud(code);
+          }
+        }
+      });
+      window.addEventListener('online', () => {
+        this.mqttConns.forEach(c => c.connect());
+      });
+    }
     if (this.bc) {
       this.bc.onmessage = ev => {
         const msg = ev.data;
-        if (msg?.type === 'notify') {
-          this.emitUpdate();
-        } else if (msg?.type === 'rpc-req') {
-          const req = msg.req as RpcRequest;
-          const code = this.extractCode(req.path);
-          if (code && this.hostedTables.has(code)) {
-            const res = this.handleLocalRpc(req);
-            this.bc?.postMessage({ type: 'rpc-res', res });
-          }
-        } else if (msg?.type === 'rpc-res') {
-          const res = msg.res as RpcResponse;
-          const pending = this.pendingRpc.get(res.id);
-          if (pending) {
-            this.pendingRpc.delete(res.id);
-            if (res.ok) pending.resolve(res.data);
-            else pending.reject(new Error(res.error ?? '요청 실패'));
-          }
+        if (msg?.type === 'state' && msg.code && msg.raw) {
+          this.mergeIncomingTableState(String(msg.code).toUpperCase(), msg.raw as Record<string, unknown>);
         }
       };
     }
+    try {
+      const activeCode = (sessionStorage.getItem('river:room') || localStorage.getItem('river:room') || '').trim().toUpperCase();
+      if (activeCode) {
+        this.subscribeRoomCloud(activeCode);
+      }
+    } catch {}
     setInterval(() => {
       const now = Date.now();
+      const me = this.getUser();
       for (const t of this.hostedTables.values()) {
-        if (t.tick(now)) this.broadcastTableUpdate(t.code);
+        // Host ticks immediately; if host is offline/delayed by >1.5s, any seated player ticks so the game never stalls
+        const isHost = me && t.host === me.id;
+        const timerTarget = t.runoutAt || t.nextHandAt || t.deadline;
+        const isBackupTicker = me && !isHost && timerTarget > 0 && now >= timerTarget + 1500 && t.players.some(p => p.id === me.id);
+        if ((isHost || isBackupTicker) && t.tick(now)) {
+          this.broadcastTableUpdate(t.code);
+        }
       }
     }, 300);
+  }
+
+  private stateTopic(code: string): string {
+    return `river-club/v3/room/${code.toUpperCase()}/state`;
+  }
+
+  private subscribeRoomCloud(code: string): void {
+    const norm = code.trim().toUpperCase();
+    if (!norm) return;
+    this.subscribedRooms.add(norm);
+    const topic = this.stateTopic(norm);
+    this.mqttConns.forEach(c => c.subscribe(topic));
+  }
+
+  private publishRoomCloud(t: LocalPokerTable): void {
+    const topic = this.stateTopic(t.code);
+    const payload = JSON.stringify({
+      sender: this.instanceId,
+      ts: Date.now(),
+      table: t.toJSON(),
+    });
+    this.mqttConns.forEach(c => c.publish(topic, payload, true));
+  }
+
+  private handleMqttMessage(topic: string, payload: string): void {
+    const m = topic.match(/^river-club\/v3\/room\/([A-Z0-9]{8})\/state$/i);
+    if (!m) return;
+    const code = m[1].toUpperCase();
+    try {
+      const parsed = JSON.parse(payload) as { sender?: string; table?: Record<string, unknown> };
+      if (parsed?.sender === this.instanceId && this.hostedTables.has(code)) {
+        const waiters = this.roomLoadWaiters.get(code);
+        if (waiters) {
+          this.roomLoadWaiters.delete(code);
+          waiters.forEach(resolve => resolve());
+        }
+        return;
+      }
+      const rawTable = parsed?.table ?? (parsed as Record<string, unknown>);
+      if (!rawTable || typeof rawTable !== 'object' || !rawTable.code) return;
+      this.mergeIncomingTableState(code, rawTable);
+    } catch {}
+  }
+
+  private mergeIncomingTableState(code: string, rawTable: Record<string, unknown>): void {
+    const incoming = LocalPokerTable.fromJSON(rawTable);
+    const current = this.hostedTables.get(code);
+    let shouldPublishMerged = false;
+
+    if (current) {
+      if (incoming.hand < current.hand) return;
+      if (incoming.hand === current.hand && incoming.version < current.version) {
+        if (!current.running() && !incoming.running()) {
+          let currentUpdated = false;
+          for (const ip of incoming.players) {
+            const normNick = ip.nickname.trim().toLowerCase();
+            const existsInCurrent = current.players.some(
+              cp => cp.id === ip.id || cp.nickname.trim().toLowerCase() === normNick
+            );
+            if (!existsInCurrent && !ip.leaving && current.players.length < 6) {
+              current.join(ip.id, ip.nickname, ip.stack > 0 ? ip.stack : 100 * current.bb);
+              currentUpdated = true;
+            }
+          }
+          const curChatIds = new Set(current.chatLog.map(c => c.id));
+          for (const c of incoming.chatLog) {
+            if (!curChatIds.has(c.id)) {
+              current.chatLog.push(c);
+              currentUpdated = true;
+            }
+          }
+          if (currentUpdated) {
+            current.chatLog.sort((a, b) => a.time - b.time);
+            current.version = Math.max(current.version, incoming.version) + 1;
+            this.broadcastTableUpdate(code);
+          }
+        }
+        return;
+      }
+
+      // Merge any chat messages not yet in incoming
+      const chatIds = new Set(incoming.chatLog.map(c => c.id));
+      for (const c of current.chatLog) {
+        if (!chatIds.has(c.id)) {
+          incoming.chatLog.push(c);
+          shouldPublishMerged = true;
+        }
+      }
+      incoming.chatLog.sort((a, b) => a.time - b.time);
+
+      // If waiting/settled, preserve any recently joined local player who wasn't in incoming yet
+      if (!incoming.running()) {
+        for (const p of current.players) {
+          const normNick = p.nickname.trim().toLowerCase();
+          const existsInIncoming = incoming.players.some(
+            ip => ip.id === p.id || ip.nickname.trim().toLowerCase() === normNick
+          );
+          if (!existsInIncoming && !p.leaving && incoming.players.length < 6) {
+            incoming.join(p.id, p.nickname, p.stack > 0 ? p.stack : 100 * incoming.bb);
+            shouldPublishMerged = true;
+          }
+        }
+      }
+    }
+
+    this.hostedTables.set(code, incoming);
+    this.savePersistedTables();
+
+    const waiters = this.roomLoadWaiters.get(code);
+    if (waiters) {
+      this.roomLoadWaiters.delete(code);
+      waiters.forEach(resolve => resolve());
+    }
+
+    const me = this.getUser();
+    let myView: Table | undefined;
+    if (me && incoming.players.some(p => p.id === me.id)) {
+      try { myView = incoming.view(me.id); } catch {}
+    }
+    if (myView) this.saveClientSnapshot(myView, incoming.history);
+    this.emitUpdate(myView);
+
+    if (shouldPublishMerged) {
+      this.publishRoomCloud(incoming);
+    }
+  }
+
+  private async ensureRoomLoaded(code: string, currentUser: User): Promise<LocalPokerTable> {
+    const norm = code.trim().toUpperCase();
+    this.subscribeRoomCloud(norm);
+
+    if (this.hostedTables.has(norm)) {
+      return this.hostedTables.get(norm)!;
+    }
+
+    // Wait up to 1100ms for cloud retained state to arrive from EMQX / HiveMQ
+    await new Promise<void>(resolve => {
+      let set = this.roomLoadWaiters.get(norm);
+      if (!set) {
+        set = new Set();
+        this.roomLoadWaiters.set(norm, set);
+      }
+      const done = () => {
+        clearTimeout(timer);
+        set?.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, 1100);
+      set.add(done);
+    });
+
+    if (this.hostedTables.has(norm)) {
+      return this.hostedTables.get(norm)!;
+    }
+
+    // Fallback 1: Restore from local snapshot if available
+    if (this.promoteSnapshotToHosted(norm, currentUser)) {
+      const t = this.hostedTables.get(norm)!;
+      this.publishRoomCloud(t);
+      return t;
+    }
+
+    // Fallback 2: Automatically initialize the room on the cloud broker so old room codes/links always work!
+    const hostId = currentUser.id !== 'anon' ? currentUser.id : uuid();
+    const hostNick = currentUser.nickname && currentUser.nickname !== 'Guest' ? currentUser.nickname : '포커';
+    const created = new LocalPokerTable(norm, `${hostNick}의 테이블`, hostId, '');
+    if (currentUser.id !== 'anon') {
+      created.join(currentUser.id, currentUser.nickname, 100 * created.bb);
+    }
+    this.hostedTables.set(norm, created);
+    this.savePersistedTables();
+    this.publishRoomCloud(created);
+    return created;
   }
 
   private loadPersistedState(): void {
@@ -835,12 +1209,6 @@ class ServerlessCoordinator {
         for (const [code, snap] of Object.entries(parsed)) {
           if (snap?.table) this.savedSnapshots.set(code.toUpperCase(), snap);
         }
-      }
-    } catch {}
-    try {
-      const activeCode = (sessionStorage.getItem('river:room') || localStorage.getItem('river:room') || '').trim().toUpperCase();
-      if (activeCode && this.hostedTables.has(activeCode)) {
-        this.setupHostPeer(activeCode);
       }
     } catch {}
   }
@@ -909,16 +1277,6 @@ class ServerlessCoordinator {
     const norm = code.trim().toUpperCase();
     this.hostedTables.delete(norm);
     this.savedSnapshots.delete(norm);
-    const peer = this.hostPeers.get(norm);
-    if (peer) {
-      try { peer.destroy(); } catch {}
-      this.hostPeers.delete(norm);
-    }
-    const timer = this.hostPeerRetryTimers.get(norm);
-    if (timer) {
-      clearTimeout(timer);
-      this.hostPeerRetryTimers.delete(norm);
-    }
     this.savePersistedTables();
     try {
       const obj: Record<string, unknown> = {};
@@ -970,174 +1328,19 @@ class ServerlessCoordinator {
 
   private broadcastTableUpdate(code: string): void {
     const t = this.hostedTables.get(code);
-    if (t) {
-      t.updatedAt = Date.now();
-      this.savePersistedTables();
-    }
+    if (!t) return;
+    t.updatedAt = Date.now();
+    this.savePersistedTables();
+    this.publishRoomCloud(t);
+    this.bc?.postMessage({ type: 'state', code, raw: t.toJSON() });
+
     const hostUser = this.getUser();
     let hostView: Table | undefined;
-    if (t && hostUser && t.players.some(p => p.id === hostUser.id)) {
+    if (hostUser && t.players.some(p => p.id === hostUser.id)) {
       try { hostView = t.view(hostUser.id); } catch {}
     }
-    if (hostView && t) this.saveClientSnapshot(hostView, t.history);
+    if (hostView) this.saveClientSnapshot(hostView, t.history);
     this.emitUpdate(hostView);
-    this.bc?.postMessage({ type: 'notify', code });
-    const peer = this.hostPeers.get(code);
-    if (peer && t) {
-      Object.values(peer.connections).flat().forEach((conn: unknown) => {
-        const dc = conn as DataConnection;
-        if (dc && dc.open) {
-          const uid = this.connUsers.get(dc);
-          let view: Table | undefined;
-          if (uid && t.players.some(p => p.id === uid)) {
-            try { view = t.view(uid); } catch {}
-          }
-          dc.send({ type: 'notify', code, table: view });
-        }
-      });
-    }
-  }
-
-  private scheduleHostPeerRetry(code: string, delayMs = 2000): void {
-    if (this.hostPeerRetryTimers.has(code) || !this.hostedTables.has(code)) return;
-    const timer = setTimeout(() => {
-      this.hostPeerRetryTimers.delete(code);
-      if (this.hostedTables.has(code)) this.setupHostPeer(code);
-    }, delayMs);
-    this.hostPeerRetryTimers.set(code, timer);
-  }
-
-  private setupHostPeer(code: string): void {
-    const existing = this.hostPeers.get(code);
-    if (existing && !existing.destroyed) {
-      if (existing.disconnected) {
-        try { existing.reconnect(); } catch {}
-      }
-      return;
-    }
-    this.hostPeers.delete(code);
-    try {
-      const peer = new Peer(`river-club-room-${code}`);
-      peer.on('disconnected', () => {
-        if (!peer.destroyed) {
-          try { peer.reconnect(); } catch {}
-        }
-      });
-      peer.on('error', () => {
-        if (this.hostPeers.get(code) === peer) this.hostPeers.delete(code);
-        try { peer.destroy(); } catch {}
-        this.scheduleHostPeerRetry(code, 2200);
-      });
-      peer.on('close', () => {
-        if (this.hostPeers.get(code) === peer) this.hostPeers.delete(code);
-        this.scheduleHostPeerRetry(code, 2200);
-      });
-      peer.on('connection', conn => {
-        conn.on('data', raw => {
-          const msg = raw as { type?: string; req?: RpcRequest };
-          if (msg?.type === 'rpc-req' && msg.req) {
-            if (msg.req.userId && msg.req.userId !== 'anon') {
-              this.connUsers.set(conn, msg.req.userId);
-            }
-            const res = this.handleLocalRpc(msg.req);
-            conn.send({ type: 'rpc-res', res });
-          }
-        });
-        conn.on('close', () => {
-          this.connUsers.delete(conn);
-        });
-      });
-      this.hostPeers.set(code, peer);
-    } catch {
-      this.scheduleHostPeerRetry(code, 2500);
-    }
-  }
-
-  private async ensureClientPeer(): Promise<Peer> {
-    if (this.clientPeer && !this.clientPeer.destroyed) {
-      if (this.clientPeer.disconnected) {
-        try { this.clientPeer.reconnect(); } catch {}
-      }
-      if (this.clientPeer.open) return this.clientPeer;
-    }
-    if (this.clientPeerPromise) return this.clientPeerPromise;
-    this.clientPeerPromise = new Promise<Peer>((resolve, reject) => {
-      const p = new Peer();
-      const timer = setTimeout(() => {
-        this.clientPeerPromise = null;
-        reject(new Error('P2P 신호 서버 연결 시간 초과'));
-      }, 6000);
-      p.once('open', () => {
-        clearTimeout(timer);
-        this.clientPeer = p;
-        this.clientPeerPromise = null;
-        resolve(p);
-      });
-      p.once('error', err => {
-        clearTimeout(timer);
-        this.clientPeerPromise = null;
-        reject(err);
-      });
-    });
-    return this.clientPeerPromise;
-  }
-
-  private async getClientConn(code: string): Promise<DataConnection> {
-    const existing = this.clientConns.get(code);
-    if (existing && existing.open) return existing;
-    const inflight = this.clientConnPromises.get(code);
-    if (inflight) return inflight;
-
-    const promise = (async () => {
-      let lastErr: unknown;
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const peer = await this.ensureClientPeer();
-          const conn = peer.connect(`river-club-room-${code}`, { reliable: true, serialization: 'json' });
-          await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => {
-              try { conn.close(); } catch {}
-              reject(new Error('방 호스트와 연결하지 못했습니다. 잠시 후 다시 시도하거나 방을 다시 열어주세요.'));
-            }, 4500);
-            conn.once('open', () => { clearTimeout(timer); resolve(); });
-            conn.once('error', err => { clearTimeout(timer); reject(err); });
-          });
-          conn.on('data', raw => {
-            const msg = raw as { type?: string; table?: Table; res?: RpcResponse };
-            if (msg?.type === 'notify') {
-              this.emitUpdate(msg.table);
-            } else if (msg?.type === 'rpc-res' && msg.res) {
-              const pending = this.pendingRpc.get(msg.res.id);
-              if (pending) {
-                this.pendingRpc.delete(msg.res.id);
-                if (msg.res.ok) pending.resolve(msg.res.data);
-                else pending.reject(new Error(msg.res.error ?? '요청 실패'));
-              }
-            }
-          });
-          conn.on('close', () => {
-            if (this.clientConns.get(code) === conn) this.clientConns.delete(code);
-          });
-          conn.on('error', () => {
-            if (this.clientConns.get(code) === conn) this.clientConns.delete(code);
-          });
-          this.clientConns.set(code, conn);
-          this.remoteRooms.add(code);
-          return conn;
-        } catch (err) {
-          lastErr = err;
-          if (attempt < 2) await new Promise(r => setTimeout(r, 1200));
-        }
-      }
-      throw lastErr instanceof Error ? lastErr : new Error('방 호스트와 연결하지 못했습니다');
-    })();
-
-    this.clientConnPromises.set(code, promise);
-    try {
-      return await promise;
-    } finally {
-      this.clientConnPromises.delete(code);
-    }
   }
 
   private handleLocalRpc(req: RpcRequest): RpcResponse {
@@ -1145,7 +1348,7 @@ class ServerlessCoordinator {
       const code = this.extractCode(req.path)!;
       const t = this.hostedTables.get(code);
       if (!t) throw new Error('방 코드를 확인해주세요');
-      this.setupHostPeer(code);
+      this.subscribeRoomCloud(code);
 
       if (req.path.startsWith('/api/invitations/')) {
         const info: InvitationInfo = {
@@ -1223,7 +1426,9 @@ class ServerlessCoordinator {
         return { id: req.id, ok: true, data: null };
       }
       if (sub === '/history') {
-        t.member(req.userId);
+        if (req.userId && req.userId !== 'anon' && !t.players.some(p => p.id === req.userId)) {
+          return { id: req.id, ok: true, data: [...t.history] };
+        }
         return { id: req.id, ok: true, data: [...t.history] };
       }
       throw new Error('지원하지 않는 요청입니다');
@@ -1242,9 +1447,7 @@ class ServerlessCoordinator {
       restored.join(currentUser.id, currentUser.nickname, 100 * restored.bb);
     }
     this.hostedTables.set(code, restored);
-    this.remoteRooms.delete(code);
     this.savePersistedTables();
-    this.setupHostPeer(code);
     return true;
   }
 
@@ -1283,10 +1486,9 @@ class ServerlessCoordinator {
       const table = new LocalPokerTable(code, String(b.name ?? `${user.nickname}의 테이블`), user.id, String(b.password ?? ''));
       table.join(user.id, user.nickname, 100 * table.bb);
       this.hostedTables.set(code, table);
-      this.savePersistedTables();
-      this.setupHostPeer(code);
+      this.subscribeRoomCloud(code);
+      this.broadcastTableUpdate(code);
       const view = table.view(user.id);
-      this.saveClientSnapshot(view, table.history);
       return view as T;
     }
 
@@ -1297,59 +1499,10 @@ class ServerlessCoordinator {
       ? { id: uuid(), userId: user.id, nickname: user.nickname, path }
       : { id: uuid(), userId: user.id, nickname: user.nickname, path, body };
 
-    // 1. Hosted in current tab
-    if (this.hostedTables.has(code)) {
-      const res = this.handleLocalRpc(req);
-      if (!res.ok) throw new Error(res.error);
-      return res.data as T;
-    }
-
-    // 2. Try same-browser BroadcastChannel first (unless already connected via remote P2P)
-    if (this.bc && !this.remoteRooms.has(code)) {
-      try {
-        const data = await new Promise<unknown>((resolve, reject) => {
-          const timer = setTimeout(() => {
-            this.pendingRpc.delete(req.id);
-            reject(new Error('bc-timeout'));
-          }, 150);
-          this.pendingRpc.set(req.id, {
-            resolve: val => { clearTimeout(timer); resolve(val); },
-            reject: err => { clearTimeout(timer); reject(err); },
-          });
-          this.bc!.postMessage({ type: 'rpc-req', req });
-        });
-        return data as T;
-      } catch (e) {
-        if (e instanceof Error && e.message !== 'bc-timeout') throw e;
-      }
-    }
-
-    // 3. Remote P2P via PeerJS WebRTC (with automatic local snapshot fallback if host is offline)
-    try {
-      const conn = await this.getClientConn(code);
-      const data = await new Promise<unknown>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.pendingRpc.delete(req.id);
-          reject(new Error('호스트 응답 시간 초과'));
-        }, 6000);
-        this.pendingRpc.set(req.id, {
-          resolve: val => { clearTimeout(timer); resolve(val); },
-          reject: err => { clearTimeout(timer); reject(err); },
-        });
-        conn.send({ type: 'rpc-req', req });
-      });
-      if (data && typeof data === 'object' && 'code' in (data as Record<string, unknown>) && 'players' in (data as Record<string, unknown>)) {
-        this.saveClientSnapshot(data as Table);
-      }
-      return data as T;
-    } catch (err) {
-      if (this.promoteSnapshotToHosted(code, user)) {
-        const res = this.handleLocalRpc(req);
-        if (!res.ok) throw new Error(res.error);
-        return res.data as T;
-      }
-      throw err;
-    }
+    await this.ensureRoomLoaded(code, user);
+    const res = this.handleLocalRpc(req);
+    if (!res.ok) throw new Error(res.error);
+    return res.data as T;
   }
 }
 

@@ -417,8 +417,14 @@ export class LocalPokerTable {
     p.committed += delta;
   }
 
+  private minRaiseDelta(p?: InternalPlayer): number {
+    const potNow = this.players.reduce((s, q) => s + q.committed, 0);
+    const toCall = p ? Math.max(0, this.currentBet - p.bet) : 0;
+    return Math.max(1, Math.round((potNow + toCall) / 3));
+  }
+
   private mayRaise(p: InternalPlayer): boolean {
-    return p.lastActedAt <= 0 || this.currentBet - p.lastActedAt >= this.lastRaise;
+    return p.lastActedAt <= 0 || this.currentBet - p.lastActedAt >= Math.min(this.lastRaise, this.minRaiseDelta(p));
   }
 
   allowed(id: string): string[] {
@@ -444,7 +450,8 @@ export class LocalPokerTable {
     else if (act === 'BET' || act === 'RAISE') {
       this.req(amount !== undefined, '금액을 입력해주세요');
       target = amount!;
-      this.req(target > this.currentBet && target >= this.currentBet + this.lastRaise, '최소 레이즈 금액 미달');
+      const minTo = this.currentBet + Math.min(this.lastRaise, this.minRaiseDelta(p));
+      this.req(target > this.currentBet && target >= minTo, '최소 레이즈 금액 미달');
     }
     this.req(target >= p.bet && target <= p.bet + p.stack, '베팅 금액 범위 오류');
     if (target > this.currentBet) {
@@ -730,7 +737,7 @@ export class LocalPokerTable {
       sb: this.sb,
       bb: this.bb,
       currentBet: this.currentBet,
-      minRaiseTo: this.currentBet + this.lastRaise,
+      minRaiseTo: this.currentBet + this.minRaiseDelta(this.players.find(p => p.id === userId)),
       pot: this.players.reduce((s, p) => s + p.committed, 0),
       actor: this.actor,
       deadline: this.deadline > 0 ? this.deadline : this.runoutAt,

@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: river-club-holdem
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: SPRING_PROFILES_ACTIVE
+        value: local
+      - key: SESSION_COOKIE_SECURE
+        value: "true"

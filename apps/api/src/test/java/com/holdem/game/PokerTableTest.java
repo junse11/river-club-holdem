@@ -1,0 +1,34 @@
+package com.holdem.game;
+import org.junit.jupiter.api.Test;
+import java.util.*;
+import static org.assertj.core.api.Assertions.*;
+
+class PokerTableTest {
+    @Test void dealerLeavingDoesNotBreakRemainingPlayersSnapshot(){var t=table(10000,10000);t.start("a");t.leave("a");assertThat(t.players).hasSize(1);assertThat(t.host).isEqualTo("b");assertThatCode(()->t.view("b")).doesNotThrowAnyException();assertThat(t.position(t.member("b"))).isEqualTo("BB");t.join("c","New friend",10000);t.member("c").ready=true;t.start("b");assertThatCode(()->t.view("c")).doesNotThrowAnyException();t.invariant();}
+    @Test void randomizedLegalHandsConserveChips(){Random r=new Random(42);for(int n=0;n<100;n++){var t=table(500+r.nextInt(2000),500+r.nextInt(2000));for(int i=2;i<2+n%5;i++){t.join("p"+i,"P"+i,500+r.nextInt(2000));t.member("p"+i).ready=true;}t.start("a");int steps=0;while(t.running()&&steps++<100){String id=t.players.stream().filter(p->p.seat==t.actor).findFirst().orElseThrow().id;List<String> actions=new ArrayList<>(t.allowed(id));actions.remove("RAISE");actions.remove("BET");act(t,actions.get(r.nextInt(actions.size())),null);t.invariant();}assertThat(t.street).isEqualTo("SETTLED");}}
+    PokerTable table(long a,long b){var t=new PokerTable("FRIENDS1","Friends","a");t.join("a","Alice",a);t.join("b","Bob",b);t.players.forEach(p->p.ready=true);return t;}
+    void act(PokerTable t,String action,Long amount){String id=t.players.stream().filter(p->p.seat==t.actor).findFirst().orElseThrow().id;t.action(id,action,amount,t.version,t.hand);}
+    @Test void allCategoriesAndWheel(){
+        List<List<String>> hands=List.of(List.of("14S","13D","9C","6H","3S"),List.of("14S","14D","9C","6H","3S"),List.of("14S","14D","9C","9H","3S"),List.of("14S","14D","14C","6H","3S"),List.of("9S","8D","7C","6H","5S"),List.of("14S","11S","9S","6S","3S"),List.of("14S","14D","14C","6H","6S"),List.of("14S","14D","14C","14H","3S"),List.of("14S","13S","12S","11S","10S"));
+        long previous=-1;for(var h:hands){long rank=HandRank.evaluate(h);assertThat(rank).isGreaterThan(previous);previous=rank;}
+        assertThat(HandRank.evaluate(List.of("14S","2D","3C","4H","5S"))).isLessThan(HandRank.evaluate(List.of("2S","3D","4C","5H","6S")));
+        assertThat(HandRank.evaluate(List.of("14S","13S","12S","11S","10S","2D","3C"))).isEqualTo(previous);
+    }
+    @Test void headsUpOrderAndPrivateCards(){var t=table(10000,10000);t.start("a");assertThat(t.actor).isEqualTo(t.button);assertThat(t.position(t.member("a"))).isEqualTo("BTN / SB");
+        var opponents=(List<Map<String,Object>>)t.view("a").get("players");assertThat(opponents.get(1).get("cards")).isEqualTo(List.of());
+        act(t,"CALL",null);act(t,"CHECK",null);assertThat(t.street).isEqualTo("FLOP");assertThat(t.actor).isEqualTo(1);t.invariant();
+    }
+    @Test void illegalAndStaleActionsDoNotMoveChips(){var t=table(1000,1000);t.start("a");long v=t.version;assertThatThrownBy(()->t.action("b","FOLD",null,v,t.hand)).isInstanceOf(IllegalArgumentException.class);assertThatThrownBy(()->t.action("a","RAISE",150L,v,t.hand)).isInstanceOf(IllegalArgumentException.class);assertThat(t.version).isEqualTo(v);t.invariant();}
+    @Test void allInRunsOutAndConserves(){var t=table(500,1000);t.start("a");act(t,"ALL_IN",null);assertThat(t.allowed("b")).doesNotContain("RAISE","ALL_IN");act(t,"CALL",null);assertThat(t.street).isEqualTo("SETTLED");assertThat(t.board).hasSize(5);assertThat(t.players.stream().mapToLong(p->p.stack).sum()).isEqualTo(1500);}
+    @Test void foldAwardsPotAndNextButtonRotates(){var t=table(1000,1000);t.start("a");act(t,"FOLD",null);assertThat(t.member("b").stack).isEqualTo(1050);
+        var bView=(List<Map<String,Object>>)t.view("b").get("players");assertThat(bView.get(0).get("cards")).isEqualTo(List.of());
+        t.showdown("a",true);bView=(List<Map<String,Object>>)t.view("b").get("players");assertThat((List<?>)bView.get(0).get("cards")).hasSize(2);
+        t.showdown("a",false);bView=(List<Map<String,Object>>)t.view("b").get("players");assertThat(bView.get(0).get("cards")).isEqualTo(List.of());
+        t.begin();assertThat(t.button).isEqualTo(1);assertThat(t.member("a").showdown).isFalse();}
+    @Test void sidePotsSplitAndUncalledReturned(){var t=table(100,200);t.join("c","Charlie",300);t.member("c").ready=true;t.start("a");act(t,"ALL_IN",null);act(t,"ALL_IN",null);act(t,"CALL",null);assertThat(t.street).isEqualTo("SETTLED");assertThat(t.players.stream().mapToLong(p->p.stack).sum()).isEqualTo(600);assertThat(t.history).hasSize(1);}
+    @Test void shortRaiseDoesNotReopen(){var t=table(1000,250);t.join("c","Charlie",1000);t.member("c").ready=true;t.start("a");act(t,"RAISE",200L);act(t,"ALL_IN",null);act(t,"CALL",null);assertThat(t.allowed("a")).doesNotContain("RAISE","ALL_IN");act(t,"CALL",null);assertThat(t.street).isEqualTo("FLOP");}
+    @Test void ownerAndBuyinValidation(){var t=table(1000,1000);assertThatThrownBy(()->t.blinds("b",10,20)).isInstanceOf(IllegalArgumentException.class);assertThatThrownBy(()->t.join("c","C",1000001)).isInstanceOf(IllegalArgumentException.class);t.start("a");t.blinds("a",100,200);assertThat(t.bb).isEqualTo(100);act(t,"FOLD",null);t.begin();assertThat(t.bb).isEqualTo(200);}
+    @Test void timeoutFoldsAndDeckUnique(){var t=table(1000,1000);t.start("a");List<String> cards=new ArrayList<>();t.players.forEach(p->cards.addAll(p.cards));assertThat(new HashSet<>(cards)).hasSize(4);t.tick(t.deadline+1);assertThat(t.street).isEqualTo("SETTLED");}
+    @Test void splitPotByBoard(){var t=table(1000,1000);t.start("a");act(t,"CALL",null);act(t,"CHECK",null);while(!t.street.equals("RIVER"))act(t,"CHECK",null);t.board.clear();t.board.addAll(List.of("14S","13S","12S","11S","10S"));t.member("a").cards.clear();t.member("a").cards.addAll(List.of("2D","3D"));t.member("b").cards.clear();t.member("b").cards.addAll(List.of("4D","5D"));act(t,"CHECK",null);act(t,"CHECK",null);assertThat(t.member("a").stack).isEqualTo(1000);assertThat(t.member("b").stack).isEqualTo(1000);}
+    @Test void sidePotAwardedSeparately(){var t=table(100,200);t.join("c","Charlie",300);t.member("c").ready=true;t.start("a");t.board.clear();t.board.addAll(List.of("2C","5D","8H","10S","11C"));String[][]holes={{"14S","14D"},{"13S","13D"},{"12S","12D"}};for(int i=0;i<3;i++){var p=t.players.get(i);p.cards.clear();p.cards.addAll(List.of(holes[i]));p.stack=0;p.committed=(i+1)*100;p.bet=p.committed;}t.settle();assertThat(t.member("a").stack).isEqualTo(300);assertThat(t.member("b").stack).isEqualTo(200);assertThat(t.member("c").stack).isEqualTo(100);t.invariant();}
+}

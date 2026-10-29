@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.gradle/
+build/
+.env
+*.log
+.idea/

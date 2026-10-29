@@ -1,0 +1,1 @@
+{"name":"holdem-workspace","private":true,"workspaces":["apps/web"],"scripts":{"dev":"npm run dev -w apps/web","build":"npm run build -w apps/web","typecheck":"npm run typecheck -w apps/web"},"engines":{"node":">=20.19.0"},"devDependencies":{"ws":"^8.22.0"}}

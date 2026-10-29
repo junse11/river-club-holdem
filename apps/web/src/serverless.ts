@@ -125,10 +125,22 @@ export class LocalPokerTable {
   }
 
   join(id: string, nickname: string, buyin: number): void {
-    const existing = this.players.find(p => p.id === id);
+    if (!this.running()) this.cleanup();
+    const normNick = nickname.trim().toLowerCase();
+    const existing = this.players.find(p => p.id === id || (normNick.length > 0 && p.nickname.trim().toLowerCase() === normNick));
     if (existing) {
-      if (nickname) existing.nickname = nickname;
+      const oldId = existing.id;
+      if (oldId !== id) {
+        existing.id = id;
+        if (this.host === oldId) this.host = id;
+        if (this.pending.has(oldId)) {
+          this.pending.delete(oldId);
+          this.pending.add(id);
+        }
+      }
+      if (nickname) existing.nickname = nickname.trim();
       existing.leaving = false;
+      if (!this.running()) this.assignPreviewPositions();
       this.version++;
       return;
     }
@@ -137,11 +149,12 @@ export class LocalPokerTable {
     const used = new Set(this.players.map(p => p.seat));
     while (used.has(seat)) seat++;
     this.players.push({
-      id, nickname, seat, stack: buyin, bet: 0, committed: 0, bountyUnits: 0,
+      id, nickname: nickname.trim(), seat, stack: buyin, bet: 0, committed: 0, bountyUnits: 0,
       lastActedAt: -1, ready: false, folded: false, inHand: false, leaving: false,
-      showdown: false, position: 'WAIT', cards: [],
+      showdown: false, position: 'BTN', cards: [],
     });
     this.players.sort((a, b) => a.seat - b.seat);
+    if (!this.running()) this.assignPreviewPositions();
     this.version++;
   }
 
@@ -451,6 +464,7 @@ export class LocalPokerTable {
     if (!this.players.some(p => p.id === this.host) && this.players.length > 0) {
       this.host = this.players[0].id;
     }
+    this.assignPreviewPositions();
   }
 
   tick(now: number): boolean {
@@ -500,9 +514,27 @@ export class LocalPokerTable {
       order.push(this.at(seat));
       seat = this.nextSeat(seat, q => q.inHand);
     } while (seat !== this.button && order.length < 6);
-    const names: string[][] = [[], [], ['BTN / SB', 'BB'], ['BTN', 'SB', 'BB'], ['BTN', 'SB', 'BB', 'CO'], ['BTN', 'SB', 'BB', 'UTG', 'CO'], ['BTN', 'SB', 'BB', 'UTG', 'HJ', 'CO']];
+    const names: string[][] = [[], ['BTN'], ['BTN / SB', 'BB'], ['BTN', 'SB', 'BB'], ['BTN', 'SB', 'BB', 'CO'], ['BTN', 'SB', 'BB', 'UTG', 'CO'], ['BTN', 'SB', 'BB', 'UTG', 'HJ', 'CO']];
     for (const p of this.players) {
       p.position = p.inHand ? names[order.length][order.indexOf(p)] : 'WAIT';
+    }
+  }
+
+  private assignPreviewPositions(): void {
+    const active = this.players.filter(p => !p.leaving);
+    if (active.length === 0) return;
+    const names: string[][] = [[], ['BTN'], ['BTN / SB', 'BB'], ['BTN', 'SB', 'BB'], ['BTN', 'SB', 'BB', 'CO'], ['BTN', 'SB', 'BB', 'UTG', 'CO'], ['BTN', 'SB', 'BB', 'UTG', 'HJ', 'CO']];
+    const startSeat = this.button >= 0 && active.some(p => p.seat === this.button) ? this.button : active[0].seat;
+    const order: InternalPlayer[] = [];
+    let seat = startSeat;
+    do {
+      const found = active.find(p => p.seat === seat);
+      if (found) order.push(found);
+      seat = this.nextSeat(seat, q => !q.leaving);
+    } while (seat !== startSeat && seat >= 0 && order.length < active.length);
+    for (const p of active) {
+      const idx = order.indexOf(p);
+      p.position = idx >= 0 ? names[order.length][idx] : 'WAIT';
     }
   }
 
@@ -609,8 +641,12 @@ class ServerlessCoordinator {
 
   private getUser(): User | null {
     try {
-      const raw = sessionStorage.getItem('river:p2p:user');
-      return raw ? (JSON.parse(raw) as User) : null;
+      const raw = localStorage.getItem('river:p2p:user') ?? sessionStorage.getItem('river:p2p:user');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as User;
+      sessionStorage.setItem('river:p2p:user', raw);
+      localStorage.setItem('river:p2p:user', raw);
+      return parsed;
     } catch {
       return null;
     }
@@ -620,8 +656,11 @@ class ServerlessCoordinator {
     try {
       if (!u) {
         sessionStorage.removeItem('river:p2p:user');
+        localStorage.removeItem('river:p2p:user');
       } else {
-        sessionStorage.setItem('river:p2p:user', JSON.stringify(u));
+        const str = JSON.stringify(u);
+        sessionStorage.setItem('river:p2p:user', str);
+        localStorage.setItem('river:p2p:user', str);
       }
     } catch {}
   }

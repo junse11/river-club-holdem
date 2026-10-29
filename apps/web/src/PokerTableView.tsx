@@ -13,7 +13,7 @@ export function PokerTableView({ table, userId, now, money }: { table: Table; us
       <div className={`turn-clock ${playing && actor && seconds <= 10 ? 'urgent' : ''}`} role="timer" aria-label="남은 행동 시간">{playing ? (actor ? <><b>{seconds}</b><span>초 남음</span></> : <span>올인 오픈</span>) : <span>대기 중</span>}</div>
     </div>
     <div className="poker-table" aria-label="6인 포커 테이블">
-      <div className="felt"><small>RIVER CLUB</small><div className="board" aria-label="공용 카드">{Array.from({ length: 5 }, (_, i) => table.board[i] ? <Card key={i} value={table.board[i]} /> : <span className="slot" aria-label="미공개 공용 카드" key={i}/>)}</div><b>POT {money(table.pot)}</b></div>
+      <div className="felt"><small>↻ 시계방향 진행 · BTN → SB → BB</small><div className="board" aria-label="공용 카드">{Array.from({ length: 5 }, (_, i) => table.board[i] ? <Card key={i} value={table.board[i]} /> : <span className="slot" aria-label="미공개 공용 카드" key={i}/>)}</div><b>POT {money(table.pot)}</b></div>
       {Array.from({ length: 6 }, (_, seat) => {
         const p = table.players.find(player => player.seat === seat);
         const relative = (seat - (me?.seat ?? 0) + 6) % 6;

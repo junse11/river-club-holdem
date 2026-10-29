@@ -13,9 +13,14 @@ export function ActionControls({ table, me, money, busy, act, secondsLeft }: {
   const minimum = Math.min(table.minRaiseTo, maximum);
   const toCall = Math.min(Math.max(0, table.currentBet - (me?.bet ?? 0)), me?.stack ?? 0);
   const raiseAction = table.allowedActions.includes('RAISE') ? 'RAISE' : table.allowedActions.includes('BET') ? 'BET' : null;
+  const raiseLabel = raiseAction ?? (table.currentBet === 0 ? 'BET' : 'RAISE');
+  const canFold = table.allowedActions.includes('FOLD');
+  const canCheck = table.allowedActions.includes('CHECK');
+  const canCall = table.allowedActions.includes('CALL');
+  const canAllIn = table.allowedActions.includes('ALL_IN');
   const [expanded, setExpanded] = useState(false);
   const [amount, setAmount] = useState(minimum);
-  const allIn = amount === maximum && table.allowedActions.includes('ALL_IN');
+  const allIn = amount === maximum && canAllIn;
   const valid = Number.isSafeInteger(amount) && amount <= maximum && (allIn || amount >= table.minRaiseTo);
   const selectFraction = (fraction: number) => {
     // Raise by a fraction of the pot after calling, expressed as street-total chips.
@@ -23,15 +28,15 @@ export function ActionControls({ table, me, money, busy, act, secondsLeft }: {
     setAmount(Math.min(maximum, Math.max(table.minRaiseTo, target)));
   };
 
-  return <div className="actions">
-    <div className="action-status"><span>{table.allowedActions.length ? '내 차례 · 액션을 선택하세요' : '상대 플레이어의 액션 대기'}</span>{secondsLeft !== undefined && <strong role="timer" aria-label="액션 남은 시간">{secondsLeft}초 남음</strong>}</div>
+  return <div className={`actions ${table.allowedActions.length ? 'my-turn' : 'waiting-turn'}`}>
+    <div className="action-status"><span>{table.allowedActions.length ? '● 내 차례 · 액션을 선택하세요' : '상대 플레이어의 액션 대기 중 (비활성)'}</span>{secondsLeft !== undefined && <strong role="timer" aria-label="액션 남은 시간">{secondsLeft}초 남음</strong>}</div>
     <div className="controls action-buttons">
-      {table.allowedActions.includes('FOLD') && <button className="danger" disabled={busy} onClick={() => act('FOLD')}>FOLD · 폴드</button>}
-      {table.allowedActions.includes('CHECK') && <button disabled={busy} onClick={() => act('CHECK')}>CHECK · 체크</button>}
-      {table.allowedActions.includes('CALL') && <button className="call-button" disabled={busy} onClick={() => act('CALL')}>CALL · 콜 {money(toCall)}</button>}
-      {raiseAction && <button className="primary" disabled={busy} aria-expanded={expanded} aria-controls="bet-options" onClick={() => { sound.chipClick(); setExpanded(value => !value); }}>{raiseAction} · {raiseAction === 'BET' ? '베트' : '레이즈'}</button>}
-      {!raiseAction && table.allowedActions.includes('ALL_IN') && <button className="primary" disabled={busy} onClick={() => act('ALL_IN')}>ALL-IN · 올인 {money(me?.stack ?? 0)}</button>}
-      {!table.allowedActions.length && <p>다른 플레이어의 액션을 기다리는 중</p>}
+      <button className="danger" disabled={busy || !canFold} onClick={() => act('FOLD')}>FOLD · 폴드</button>
+      {canCheck || (!canCall && toCall === 0)
+        ? <button disabled={busy || !canCheck} onClick={() => act('CHECK')}>CHECK · 체크</button>
+        : <button className="call-button" disabled={busy || !canCall} onClick={() => act('CALL')}>CALL · 콜 {money(toCall)}</button>}
+      <button className="primary" disabled={busy || !raiseAction} aria-expanded={expanded && !!raiseAction} aria-controls="bet-options" onClick={() => { sound.chipClick(); setExpanded(value => !value); }}>{raiseLabel} · {raiseLabel === 'BET' ? '베트' : '레이즈'}</button>
+      <button className="primary" disabled={busy || !canAllIn} onClick={() => act('ALL_IN')}>ALL-IN · 올인 {money(me?.stack ?? 0)}</button>
     </div>
     {expanded && raiseAction && <section id="bet-options" className="bet-options" aria-label="베팅 금액 선택">
       <div className="bet-presets"><span>팟 비율</span>{[[1, 4], [1, 3], [1, 2]].map(([n, d]) => <button key={d} disabled={busy} onClick={() => { sound.chipClick(); selectFraction(n / d); }}>{n}/{d} 팟</button>)}{table.allowedActions.includes('ALL_IN') && <button disabled={busy} onClick={() => { sound.chipClick(); setAmount(maximum); }}>올인</button>}</div>

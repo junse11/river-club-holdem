@@ -124,7 +124,13 @@ export class LocalPokerTable {
   }
 
   join(id: string, nickname: string, buyin: number, isBot = false): void {
-    if (this.players.some(p => p.id === id)) return;
+    const existing = this.players.find(p => p.id === id);
+    if (existing) {
+      if (nickname) existing.nickname = nickname;
+      existing.leaving = false;
+      this.version++;
+      return;
+    }
     this.req(this.players.length < 6, '방이 가득 찼습니다');
     let seat = 0;
     const used = new Set(this.players.map(p => p.seat));
@@ -519,10 +525,14 @@ type RpcResponse = { id: string; ok: boolean; data?: unknown; error?: string };
 class ServerlessCoordinator {
   private hostedTables = new Map<string, LocalPokerTable>();
   private hostPeers = new Map<string, Peer>();
+  private connUsers = new Map<DataConnection, string>();
   private clientConns = new Map<string, DataConnection>();
+  private clientConnPromises = new Map<string, Promise<DataConnection>>();
   private clientPeer: Peer | null = null;
+  private clientPeerPromise: Promise<Peer> | null = null;
+  private remoteRooms = new Set<string>();
   private pendingRpc = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-  private updateListeners = new Set<() => void>();
+  private updateListeners = new Set<(table?: Table) => void>();
   private bc: BroadcastChannel | null = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('river-club-p2p') : null;
 
   constructor() {
@@ -557,18 +567,18 @@ class ServerlessCoordinator {
     }, 900);
   }
 
-  onUpdate(fn: () => void): () => void {
+  onUpdate(fn: (table?: Table) => void): () => void {
     this.updateListeners.add(fn);
     return () => this.updateListeners.delete(fn);
   }
 
-  private emitUpdate(): void {
-    this.updateListeners.forEach(fn => fn());
+  private emitUpdate(table?: Table): void {
+    this.updateListeners.forEach(fn => fn(table));
   }
 
   private getUser(): User | null {
     try {
-      const raw = sessionStorage.getItem('river:p2p:user') ?? localStorage.getItem('river:p2p:user');
+      const raw = sessionStorage.getItem('river:p2p:user');
       return raw ? (JSON.parse(raw) as User) : null;
     } catch {
       return null;
@@ -579,11 +589,8 @@ class ServerlessCoordinator {
     try {
       if (!u) {
         sessionStorage.removeItem('river:p2p:user');
-        localStorage.removeItem('river:p2p:user');
       } else {
-        const str = JSON.stringify(u);
-        sessionStorage.setItem('river:p2p:user', str);
-        localStorage.setItem('river:p2p:user', str);
+        sessionStorage.setItem('river:p2p:user', JSON.stringify(u));
       }
     } catch {}
   }
@@ -594,13 +601,26 @@ class ServerlessCoordinator {
   }
 
   private broadcastTableUpdate(code: string): void {
-    this.emitUpdate();
+    const t = this.hostedTables.get(code);
+    const hostUser = this.getUser();
+    let hostView: Table | undefined;
+    if (t && hostUser && t.players.some(p => p.id === hostUser.id)) {
+      try { hostView = t.view(hostUser.id); } catch {}
+    }
+    this.emitUpdate(hostView);
     this.bc?.postMessage({ type: 'notify', code });
     const peer = this.hostPeers.get(code);
-    if (peer) {
+    if (peer && t) {
       Object.values(peer.connections).flat().forEach((conn: unknown) => {
         const dc = conn as DataConnection;
-        if (dc.open) dc.send({ type: 'notify', code });
+        if (dc && dc.open) {
+          const uid = this.connUsers.get(dc);
+          let view: Table | undefined;
+          if (uid && t.players.some(p => p.id === uid)) {
+            try { view = t.view(uid); } catch {}
+          }
+          dc.send({ type: 'notify', code, table: view });
+        }
       });
     }
   }
@@ -609,51 +629,101 @@ class ServerlessCoordinator {
     if (this.hostPeers.has(code)) return;
     try {
       const peer = new Peer(`river-club-room-${code}`);
+      peer.on('disconnected', () => {
+        try { peer.reconnect(); } catch {}
+      });
       peer.on('connection', conn => {
         conn.on('data', raw => {
           const msg = raw as { type?: string; req?: RpcRequest };
           if (msg?.type === 'rpc-req' && msg.req) {
+            if (msg.req.userId && msg.req.userId !== 'anon') {
+              this.connUsers.set(conn, msg.req.userId);
+            }
             const res = this.handleLocalRpc(msg.req);
             conn.send({ type: 'rpc-res', res });
           }
+        });
+        conn.on('close', () => {
+          this.connUsers.delete(conn);
         });
       });
       this.hostPeers.set(code, peer);
     } catch {}
   }
 
+  private async ensureClientPeer(): Promise<Peer> {
+    if (this.clientPeer && !this.clientPeer.destroyed) {
+      if (this.clientPeer.disconnected) {
+        try { this.clientPeer.reconnect(); } catch {}
+      }
+      if (this.clientPeer.open) return this.clientPeer;
+    }
+    if (this.clientPeerPromise) return this.clientPeerPromise;
+    this.clientPeerPromise = new Promise<Peer>((resolve, reject) => {
+      const p = new Peer();
+      const timer = setTimeout(() => {
+        this.clientPeerPromise = null;
+        reject(new Error('P2P 신호 서버 연결 시간 초과'));
+      }, 7000);
+      p.once('open', () => {
+        clearTimeout(timer);
+        this.clientPeer = p;
+        this.clientPeerPromise = null;
+        resolve(p);
+      });
+      p.once('error', err => {
+        clearTimeout(timer);
+        this.clientPeerPromise = null;
+        reject(err);
+      });
+    });
+    return this.clientPeerPromise;
+  }
+
   private async getClientConn(code: string): Promise<DataConnection> {
     const existing = this.clientConns.get(code);
     if (existing && existing.open) return existing;
-    if (!this.clientPeer || this.clientPeer.destroyed) {
-      this.clientPeer = new Peer();
+    const inflight = this.clientConnPromises.get(code);
+    if (inflight) return inflight;
+
+    const promise = (async () => {
+      const peer = await this.ensureClientPeer();
+      const conn = peer.connect(`river-club-room-${code}`, { reliable: true, serialization: 'json' });
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('P2P 신호 서버 연결 시간 초과')), 7000);
-        this.clientPeer!.once('open', () => { clearTimeout(timer); resolve(); });
-        this.clientPeer!.once('error', err => { clearTimeout(timer); reject(err); });
+        const timer = setTimeout(() => reject(new Error('방 호스트와 연결하지 못했습니다. 코드를 확인해주세요.')), 7000);
+        conn.once('open', () => { clearTimeout(timer); resolve(); });
+        conn.once('error', err => { clearTimeout(timer); reject(err); });
       });
-    }
-    const conn = this.clientPeer.connect(`river-club-room-${code}`, { reliable: true });
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('방 호스트와 연결하지 못했습니다. 코드를 확인해주세요.')), 7000);
-      conn.once('open', () => { clearTimeout(timer); resolve(); });
-      conn.once('error', err => { clearTimeout(timer); reject(err); });
-    });
-    conn.on('data', raw => {
-      const msg = raw as { type?: string; res?: RpcResponse };
-      if (msg?.type === 'notify') {
-        this.emitUpdate();
-      } else if (msg?.type === 'rpc-res' && msg.res) {
-        const pending = this.pendingRpc.get(msg.res.id);
-        if (pending) {
-          this.pendingRpc.delete(msg.res.id);
-          if (msg.res.ok) pending.resolve(msg.res.data);
-          else pending.reject(new Error(msg.res.error ?? '요청 실패'));
+      conn.on('data', raw => {
+        const msg = raw as { type?: string; table?: Table; res?: RpcResponse };
+        if (msg?.type === 'notify') {
+          this.emitUpdate(msg.table);
+        } else if (msg?.type === 'rpc-res' && msg.res) {
+          const pending = this.pendingRpc.get(msg.res.id);
+          if (pending) {
+            this.pendingRpc.delete(msg.res.id);
+            if (msg.res.ok) pending.resolve(msg.res.data);
+            else pending.reject(new Error(msg.res.error ?? '요청 실패'));
+          }
         }
-      }
-    });
-    this.clientConns.set(code, conn);
-    return conn;
+      });
+      conn.on('close', () => {
+        if (this.clientConns.get(code) === conn) this.clientConns.delete(code);
+      });
+      conn.on('error', () => {
+        if (this.clientConns.get(code) === conn) this.clientConns.delete(code);
+      });
+      this.clientConns.set(code, conn);
+      this.remoteRooms.add(code);
+      return conn;
+    })();
+
+    this.clientConnPromises.set(code, promise);
+    try {
+      return await promise;
+    } finally {
+      this.clientConnPromises.delete(code);
+    }
   }
 
   private handleLocalRpc(req: RpcRequest): RpcResponse {
@@ -676,10 +746,10 @@ class ServerlessCoordinator {
         return { id: req.id, ok: true, data: info };
       }
 
-      const sub = req.path.replace(`/api/rooms/${code}`, '');
+      const sub = req.path.replace(new RegExp(`^/api/rooms/${code}`, 'i'), '');
       const body = (req.body ?? {}) as Record<string, unknown>;
 
-      if (sub === '' && req.body === undefined) {
+      if (sub === '') {
         return { id: req.id, ok: true, data: t.view(req.userId) };
       }
       if (sub === '/join') {
@@ -787,7 +857,9 @@ class ServerlessCoordinator {
     const code = this.extractCode(path);
     if (!code) throw new Error('잘못된 경로입니다');
     const user = this.getUser() ?? { id: 'anon', nickname: 'Guest' };
-    const req: RpcRequest = { id: uuid(), userId: user.id, nickname: user.nickname, path, body };
+    const req: RpcRequest = body === undefined
+      ? { id: uuid(), userId: user.id, nickname: user.nickname, path }
+      : { id: uuid(), userId: user.id, nickname: user.nickname, path, body };
 
     // 1. Hosted in current tab
     if (this.hostedTables.has(code)) {
@@ -796,14 +868,14 @@ class ServerlessCoordinator {
       return res.data as T;
     }
 
-    // 2. Try same-browser BroadcastChannel first (fast 150ms probe), then WebRTC PeerJS
-    if (this.bc) {
+    // 2. Try same-browser BroadcastChannel first (unless already connected via remote P2P)
+    if (this.bc && !this.remoteRooms.has(code)) {
       try {
         const data = await new Promise<unknown>((resolve, reject) => {
           const timer = setTimeout(() => {
             this.pendingRpc.delete(req.id);
             reject(new Error('bc-timeout'));
-          }, 180);
+          }, 150);
           this.pendingRpc.set(req.id, {
             resolve: val => { clearTimeout(timer); resolve(val); },
             reject: err => { clearTimeout(timer); reject(err); },

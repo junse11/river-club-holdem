@@ -98,6 +98,7 @@ export class LocalPokerTable {
   history: Review[] = [];
   deck: string[] = [];
   pending = new Set<string>();
+  kickedIds = new Set<string>();
   sb = 50;
   bb = 100;
   currentBet = 0;
@@ -107,6 +108,10 @@ export class LocalPokerTable {
   deadline = 0;
   nextHandAt = 0;
   runoutAt = 0;
+  paused = false;
+  pausedDeadlineRem = 0;
+  pausedRunoutRem = 0;
+  pausedNextHandRem = 0;
   pendingSb: number | null = null;
   pendingBb: number | null = null;
   button = -1;
@@ -136,6 +141,7 @@ export class LocalPokerTable {
       history: this.history.slice(-10),
       deck: this.deck,
       pending: [...this.pending],
+      kickedIds: [...this.kickedIds],
       sb: this.sb,
       bb: this.bb,
       currentBet: this.currentBet,
@@ -145,6 +151,10 @@ export class LocalPokerTable {
       deadline: this.deadline,
       nextHandAt: this.nextHandAt,
       runoutAt: this.runoutAt,
+      paused: this.paused,
+      pausedDeadlineRem: this.pausedDeadlineRem,
+      pausedRunoutRem: this.pausedRunoutRem,
+      pausedNextHandRem: this.pausedNextHandRem,
       pendingSb: this.pendingSb,
       pendingBb: this.pendingBb,
       button: this.button,
@@ -180,6 +190,7 @@ export class LocalPokerTable {
     t.history = Array.isArray(raw.history) ? (raw.history as Review[]) : [];
     t.deck = Array.isArray(raw.deck) ? (raw.deck as string[]) : [];
     t.pending = new Set(Array.isArray(raw.pending) ? (raw.pending as string[]) : []);
+    t.kickedIds = new Set(Array.isArray(raw.kickedIds) ? (raw.kickedIds as string[]) : []);
     t.sb = Number(raw.sb ?? 50);
     t.bb = Number(raw.bb ?? 100);
     t.currentBet = Number(raw.currentBet ?? 0);
@@ -187,11 +198,15 @@ export class LocalPokerTable {
     t.version = Number(raw.version ?? 0);
     t.hand = Number(raw.hand ?? 0);
     const now = Date.now();
+    t.paused = Boolean(raw.paused);
+    t.pausedDeadlineRem = Number(raw.pausedDeadlineRem ?? 0);
+    t.pausedRunoutRem = Number(raw.pausedRunoutRem ?? 0);
+    t.pausedNextHandRem = Number(raw.pausedNextHandRem ?? 0);
     t.deadline = Number(raw.deadline ?? 0);
-    if (t.deadline > 0 && t.deadline < now + 5000) t.deadline = now + 30000;
+    if (!t.paused && t.deadline > 0 && t.deadline < now + 5000) t.deadline = now + 30000;
     t.nextHandAt = Number(raw.nextHandAt ?? 0);
     t.runoutAt = Number(raw.runoutAt ?? 0);
-    if (t.runoutAt > 0 && t.runoutAt < now + 1000) t.runoutAt = now + 3000;
+    if (!t.paused && t.runoutAt > 0 && t.runoutAt < now + 1000) t.runoutAt = now + 3000;
     t.pendingSb = raw.pendingSb != null ? Number(raw.pendingSb) : null;
     t.pendingBb = raw.pendingBb != null ? Number(raw.pendingBb) : null;
     t.button = Number(raw.button ?? -1);
@@ -428,6 +443,7 @@ export class LocalPokerTable {
   }
 
   allowed(id: string): string[] {
+    if (this.paused) return [];
     const p = this.member(id);
     if (!this.running() || this.actor !== p.seat) return [];
     const a = ['FOLD', p.bet >= this.currentBet ? 'CHECK' : 'CALL'];
@@ -438,6 +454,7 @@ export class LocalPokerTable {
   }
 
   action(id: string, act: string, amount: number | undefined, expectedVersion: number, expectedHand: number): void {
+    this.req(!this.paused, '방장이 게임을 일시정지했습니다');
     this.req(this.version === expectedVersion && this.hand === expectedHand, '상태가 변경되었습니다. 다시 시도해주세요');
     const p = this.member(id);
     this.req(this.running() && p.seat === this.actor, '본인 차례가 아닙니다');
@@ -616,6 +633,61 @@ export class LocalPokerTable {
     const p = this.member(id);
     this.req(p.cards.length > 0, '공개할 홀 카드가 없습니다');
     p.showdown = reveal;
+    if (reveal && !this.paused && this.nextHandAt > 0) {
+      this.nextHandAt = Math.max(this.nextHandAt, Date.now() + 3000);
+    }
+    this.version++;
+  }
+
+  pause(hostId: string): void {
+    this.req(this.host === hostId, '방장만 일시정지할 수 있습니다');
+    const now = Date.now();
+    this.paused = !this.paused;
+    if (this.paused) {
+      this.pausedDeadlineRem = this.deadline > now ? this.deadline - now : 0;
+      this.pausedRunoutRem = this.runoutAt > now ? this.runoutAt - now : 0;
+      this.pausedNextHandRem = this.nextHandAt > now ? this.nextHandAt - now : 0;
+      this.deadline = 0;
+      this.runoutAt = 0;
+      this.nextHandAt = 0;
+    } else {
+      if (this.pausedDeadlineRem > 0) this.deadline = now + this.pausedDeadlineRem;
+      else if (this.running() && this.actor >= 0 && this.pausedRunoutRem === 0) this.deadline = now + 30000;
+      if (this.pausedRunoutRem > 0) this.runoutAt = now + this.pausedRunoutRem;
+      if (this.pausedNextHandRem > 0) this.nextHandAt = now + this.pausedNextHandRem;
+      this.pausedDeadlineRem = 0;
+      this.pausedRunoutRem = 0;
+      this.pausedNextHandRem = 0;
+    }
+    this.version++;
+  }
+
+  kick(hostId: string, targetUserId: string): void {
+    this.req(this.host === hostId, '방장만 강제 퇴장시킬 수 있습니다');
+    this.req(targetUserId !== hostId, '방장 본인은 강제 퇴장시킬 수 없습니다');
+    const p = this.member(targetUserId);
+    this.kickedIds.add(targetUserId);
+    const norm = p.nickname.trim().toLowerCase();
+    this.archivedPlayers = this.archivedPlayers.filter(
+      a => a.id !== p.id && a.nickname.trim().toLowerCase() !== norm
+    );
+    this.archivedPlayers.push({ ...p, leaving: false, ready: false, inHand: false, folded: false, bet: 0, committed: 0, cards: [] });
+    if (this.running() && p.inHand && !p.folded) {
+      p.leaving = true;
+      p.folded = true;
+      this.pending.delete(targetUserId);
+      const wasActor = this.actor === p.seat;
+      const prevSeat = p.seat;
+      this.players = this.players.filter(x => x.id !== targetUserId);
+      if (wasActor) {
+        this.actor = this.nextSeat(prevSeat, q => this.pending.has(q.id) && this.canAct(q));
+      }
+      this.advanceIfDone();
+      if (!this.paused) this.setDeadline();
+    } else {
+      this.players = this.players.filter(x => x.id !== targetUserId);
+      if (!this.running()) this.assignPreviewPositions();
+    }
     this.version++;
   }
 
@@ -654,6 +726,7 @@ export class LocalPokerTable {
   }
 
   tick(now: number): boolean {
+    if (this.paused) return false;
     const before = this.version;
     if (this.running()) {
       if (this.runoutAt > 0 && now >= this.runoutAt) {
@@ -690,7 +763,7 @@ export class LocalPokerTable {
   }
 
   private setDeadline(): void {
-    this.deadline = this.running() && this.actor >= 0 ? Date.now() + 30000 : 0;
+    this.deadline = !this.paused && this.running() && this.actor >= 0 ? Date.now() + 30000 : 0;
   }
 
   private assignPositions(): void {
@@ -726,6 +799,9 @@ export class LocalPokerTable {
 
   view(userId: string): Table {
     this.member(userId);
+    const activeDeadline = this.paused
+      ? (this.pausedDeadlineRem > 0 ? Date.now() + this.pausedDeadlineRem : this.pausedRunoutRem > 0 ? Date.now() + this.pausedRunoutRem : 0)
+      : (this.deadline > 0 ? this.deadline : this.runoutAt);
     return {
       code: this.code,
       name: this.name,
@@ -733,6 +809,7 @@ export class LocalPokerTable {
       version: this.version,
       hand: this.hand,
       street: this.street,
+      paused: this.paused,
       board: [...this.board],
       sb: this.sb,
       bb: this.bb,
@@ -740,7 +817,7 @@ export class LocalPokerTable {
       minRaiseTo: this.currentBet + this.minRaiseDelta(this.players.find(p => p.id === userId)),
       pot: this.players.reduce((s, p) => s + p.committed, 0),
       actor: this.actor,
-      deadline: this.deadline > 0 ? this.deadline : this.runoutAt,
+      deadline: activeDeadline,
       result: this.result,
       resetPending: this.resetPending,
       bountyAwards: this.bountyAwards,
@@ -1082,7 +1159,7 @@ class ServerlessCoordinator {
             const existsInCurrent = current.players.some(
               cp => cp.id === ip.id || cp.nickname.trim().toLowerCase() === normNick
             );
-            if (!existsInCurrent && !ip.leaving && current.players.length < 6) {
+            if (!existsInCurrent && !ip.leaving && !current.kickedIds.has(ip.id) && current.players.length < 6) {
               current.join(ip.id, ip.nickname, ip.stack > 0 ? ip.stack : 100 * current.bb);
               currentUpdated = true;
             }
@@ -1120,7 +1197,7 @@ class ServerlessCoordinator {
           const existsInIncoming = incoming.players.some(
             ip => ip.id === p.id || ip.nickname.trim().toLowerCase() === normNick
           );
-          if (!existsInIncoming && !p.leaving && incoming.players.length < 6) {
+          if (!existsInIncoming && !p.leaving && !incoming.kickedIds.has(p.id) && incoming.players.length < 6) {
             incoming.join(p.id, p.nickname, p.stack > 0 ? p.stack : 100 * incoming.bb);
             shouldPublishMerged = true;
           }
@@ -1375,6 +1452,9 @@ class ServerlessCoordinator {
       const body = (req.body ?? {}) as Record<string, unknown>;
 
       if (sub === '') {
+        if (req.userId && t.kickedIds.has(req.userId)) {
+          throw new Error('방장에 의해 강제 퇴장되었습니다');
+        }
         if (req.userId && req.userId !== 'anon' && !t.players.some(p => p.id === req.userId)) {
           t.join(req.userId, req.nickname || 'Player', 100 * t.bb);
           this.broadcastTableUpdate(code);
@@ -1385,7 +1465,18 @@ class ServerlessCoordinator {
       }
       if (sub === '/join') {
         const nick = String(body.nickname ?? req.nickname).trim();
+        t.kickedIds.delete(req.userId);
         t.join(req.userId, nick, 100 * t.bb);
+        this.broadcastTableUpdate(code);
+        return { id: req.id, ok: true, data: t.view(req.userId) };
+      }
+      if (sub === '/pause') {
+        t.pause(req.userId);
+        this.broadcastTableUpdate(code);
+        return { id: req.id, ok: true, data: t.view(req.userId) };
+      }
+      if (sub === '/kick') {
+        t.kick(req.userId, String(body.userId ?? ''));
         this.broadcastTableUpdate(code);
         return { id: req.id, ok: true, data: t.view(req.userId) };
       }

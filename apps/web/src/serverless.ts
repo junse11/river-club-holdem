@@ -1,5 +1,5 @@
 import Peer, { DataConnection } from 'peerjs';
-import type { BountyAward, InvitationInfo, Player, Review, Table, User } from './types';
+import type { BountyAward, ChatMessage, InvitationInfo, Player, Review, Table, User } from './types';
 
 function uuid(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -73,7 +73,6 @@ type InternalPlayer = {
   inHand: boolean;
   leaving: boolean;
   showdown: boolean;
-  isBot?: boolean;
   position: string;
   cards: string[];
 };
@@ -84,6 +83,7 @@ export class LocalPokerTable {
   players: InternalPlayer[] = [];
   board: string[] = [];
   log: { nickname: string; action: string; amountTo: number; street: string }[] = [];
+  chatLog: ChatMessage[] = [];
   history: Review[] = [];
   deck: string[] = [];
   pending = new Set<string>();
@@ -95,6 +95,7 @@ export class LocalPokerTable {
   hand = 0;
   deadline = 0;
   nextHandAt = 0;
+  runoutAt = 0;
   pendingSb: number | null = null;
   pendingBb: number | null = null;
   button = -1;
@@ -123,7 +124,7 @@ export class LocalPokerTable {
     return p;
   }
 
-  join(id: string, nickname: string, buyin: number, isBot = false): void {
+  join(id: string, nickname: string, buyin: number): void {
     const existing = this.players.find(p => p.id === id);
     if (existing) {
       if (nickname) existing.nickname = nickname;
@@ -137,10 +138,19 @@ export class LocalPokerTable {
     while (used.has(seat)) seat++;
     this.players.push({
       id, nickname, seat, stack: buyin, bet: 0, committed: 0, bountyUnits: 0,
-      lastActedAt: -1, ready: isBot, folded: false, inHand: false, leaving: false,
-      showdown: false, isBot, position: 'WAIT', cards: [],
+      lastActedAt: -1, ready: false, folded: false, inHand: false, leaving: false,
+      showdown: false, position: 'WAIT', cards: [],
     });
     this.players.sort((a, b) => a.seat - b.seat);
+    this.version++;
+  }
+
+  chat(id: string, text: string): void {
+    const p = this.member(id);
+    const trimmed = text.trim();
+    this.req(trimmed.length >= 1 && trimmed.length <= 120, '채팅 메시지는 1~120자입니다');
+    this.chatLog.push({ id: uuid(), userId: p.id, nickname: p.nickname, text: trimmed, time: Date.now() });
+    if (this.chatLog.length > 60) this.chatLog.shift();
     this.version++;
   }
 
@@ -189,6 +199,7 @@ export class LocalPokerTable {
     this.lastRaise = this.bb;
     this.pending.clear();
     this.nextHandAt = 0;
+    this.runoutAt = 0;
     for (const p of this.players) {
       p.inHand = active.includes(p);
       p.folded = !p.inHand;
@@ -289,25 +300,7 @@ export class LocalPokerTable {
     this.setDeadline();
   }
 
-  private advanceIfDone(): void {
-    const alive = this.players.filter(p => p.inHand && !p.folded);
-    if (alive.length === 1) {
-      this.settle();
-      return;
-    }
-    for (const id of [...this.pending]) if (!this.canAct(this.member(id))) this.pending.delete(id);
-    const capable = this.players.filter(p => this.canAct(p));
-    if (capable.length === 1 && capable[0].bet >= this.currentBet) this.pending.clear();
-    if (this.pending.size > 0) {
-      if (this.actor < 0 || !this.pending.has(this.at(this.actor).id)) {
-        this.actor = this.nextSeat(this.button, p => this.pending.has(p.id));
-      }
-      return;
-    }
-    if (this.street === 'RIVER') {
-      this.settle();
-      return;
-    }
+  private dealNextStreet(): void {
     for (const p of this.players) {
       p.bet = 0;
       p.lastActedAt = -1;
@@ -322,16 +315,47 @@ export class LocalPokerTable {
       this.street = this.street === 'FLOP' ? 'TURN' : 'RIVER';
       this.board.push(this.deck.shift()!);
     }
+  }
+
+  private advanceIfDone(): void {
+    const alive = this.players.filter(p => p.inHand && !p.folded);
+    if (alive.length === 1) {
+      this.runoutAt = 0;
+      this.settle();
+      return;
+    }
+    for (const id of [...this.pending]) if (!this.canAct(this.member(id))) this.pending.delete(id);
+    const capable = this.players.filter(p => this.canAct(p));
+    if (capable.length === 1 && capable[0].bet >= this.currentBet) this.pending.clear();
+    if (this.pending.size > 0) {
+      if (this.actor < 0 || !this.pending.has(this.at(this.actor).id)) {
+        this.actor = this.nextSeat(this.button, p => this.pending.has(p.id));
+      }
+      return;
+    }
+    if (capable.length <= 1) {
+      for (const p of this.players) {
+        p.bet = 0;
+        p.lastActedAt = -1;
+      }
+      this.currentBet = 0;
+      this.actor = -1;
+      this.deadline = 0;
+      this.runoutAt = Date.now() + 1150;
+      return;
+    }
+    if (this.street === 'RIVER') {
+      this.settle();
+      return;
+    }
+    this.dealNextStreet();
     this.players.filter(p => this.canAct(p)).forEach(p => this.pending.add(p.id));
     this.actor = this.nextSeat(this.button, p => this.pending.has(p.id));
-    if (this.players.filter(p => this.canAct(p)).length <= 1) {
-      this.pending.clear();
-      this.advanceIfDone();
-    }
   }
 
   settle(): void {
     if (!this.running()) return;
+    this.runoutAt = 0;
     const lastPotWinners = new Map<string, InternalPlayer[]>();
     const payouts: { nickname: string; amount: number; rank: string }[] = [];
     const levels = [...new Set(this.players.filter(p => p.committed > 0).map(p => p.committed))].sort((a, b) => a - b);
@@ -388,12 +412,12 @@ export class LocalPokerTable {
     for (const p of this.players) {
       p.bet = 0;
       p.committed = 0;
-      p.showdown = Boolean(p.isBot && !p.folded && this.board.length === 5);
+      p.showdown = false;
     }
     this.street = 'SETTLED';
     this.actor = -1;
     this.deadline = 0;
-    this.nextHandAt = Date.now() + 7000;
+    this.nextHandAt = Date.now() + 4000;
     this.pending.clear();
   }
 
@@ -402,7 +426,6 @@ export class LocalPokerTable {
     const p = this.member(id);
     this.req(p.cards.length > 0, '공개할 홀 카드가 없습니다');
     p.showdown = reveal;
-    if (reveal && this.nextHandAt > 0) this.nextHandAt = Math.max(this.nextHandAt, Date.now() + 4000);
     this.version++;
   }
 
@@ -433,13 +456,20 @@ export class LocalPokerTable {
   tick(now: number): boolean {
     const before = this.version;
     if (this.running()) {
-      const currentActor = this.players.find(p => p.seat === this.actor);
-      if (currentActor?.isBot) {
-        const acts = this.allowed(currentActor.id);
-        const choice = acts.includes('CHECK') ? 'CHECK' : acts.includes('CALL') ? 'CALL' : 'FOLD';
-        this.action(currentActor.id, choice, undefined, this.version, this.hand);
+      if (this.runoutAt > 0 && now >= this.runoutAt) {
+        this.runoutAt = 0;
+        if (this.street === 'RIVER') {
+          this.settle();
+        } else {
+          this.dealNextStreet();
+          this.actor = -1;
+          this.deadline = 0;
+          this.runoutAt = now + 1150;
+        }
+        this.version++;
         return true;
       }
+      const currentActor = this.players.find(p => p.seat === this.actor);
       if (this.deadline > 0 && now >= this.deadline && currentActor) {
         this.action(currentActor.id, currentActor.bet >= this.currentBet ? 'CHECK' : 'FOLD', undefined, this.version, this.hand);
         return true;
@@ -460,7 +490,7 @@ export class LocalPokerTable {
   }
 
   private setDeadline(): void {
-    this.deadline = this.running() ? Date.now() + 30000 : 0;
+    this.deadline = this.running() && this.actor >= 0 ? Date.now() + 30000 : 0;
   }
 
   private assignPositions(): void {
@@ -499,6 +529,7 @@ export class LocalPokerTable {
       pendingBlinds: this.pendingSb === null ? [] : [this.pendingSb, this.pendingBb!],
       allowedActions: this.allowed(userId),
       log: [...this.log],
+      chat: [...this.chatLog],
       players: this.players.map((p): Player => ({
         id: p.id,
         nickname: p.nickname,
@@ -564,7 +595,7 @@ class ServerlessCoordinator {
       for (const t of this.hostedTables.values()) {
         if (t.tick(now)) this.broadcastTableUpdate(t.code);
       }
-    }, 900);
+    }, 300);
   }
 
   onUpdate(fn: (table?: Table) => void): () => void {
@@ -740,7 +771,7 @@ class ServerlessCoordinator {
           capacity: 6,
           sb: t.sb,
           bb: t.bb,
-          passwordRequired: Boolean(t.password),
+          passwordRequired: false,
           running: t.running(),
         };
         return { id: req.id, ok: true, data: info };
@@ -753,17 +784,13 @@ class ServerlessCoordinator {
         return { id: req.id, ok: true, data: t.view(req.userId) };
       }
       if (sub === '/join') {
-        if (!t.players.some(p => p.id === req.userId) && t.password) {
-          if (String(body.password ?? '') !== t.password) throw new Error('방 코드 또는 비밀번호를 확인해주세요');
-        }
         const nick = String(body.nickname ?? req.nickname).trim();
         t.join(req.userId, nick, 100 * t.bb);
         this.broadcastTableUpdate(code);
         return { id: req.id, ok: true, data: t.view(req.userId) };
       }
-      if (sub === '/bot') {
-        const botNum = t.players.filter(p => p.isBot).length + 1;
-        t.join(`bot-${uuid().slice(0, 8)}`, `AI 봇 ${botNum}`, 100 * t.bb, true);
+      if (sub === '/chat') {
+        t.chat(req.userId, String(body.text ?? ''));
         this.broadcastTableUpdate(code);
         return { id: req.id, ok: true, data: t.view(req.userId) };
       }

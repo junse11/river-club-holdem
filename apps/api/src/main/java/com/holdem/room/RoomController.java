@@ -19,6 +19,7 @@ public class RoomController {
     public record Join(@Size(max=60) String password,@Size(min=2,max=20) String nickname){}
     public record Ready(boolean ready){}
     public record Showdown(boolean showdown){}
+    public record Chat(@NotBlank @Size(max=120) String text){}
     public record Blinds(@Min(1) @Max(5000) long sb,@Min(2) @Max(10000) long bb){}
     public record Action(@NotNull UUID commandId,long hand,long version,@NotBlank String action,Long amountTo){}
     @PostMapping public Map<String,Object> create(@Valid @RequestBody Create input,Principal p,HttpServletRequest request){PokerTable t=rooms.create(p.getName(),nickname(request),input.name(),input.password());synchronized(t){return t.view(p.getName());}}
@@ -26,6 +27,7 @@ public class RoomController {
     @GetMapping("/{code}") public Map<String,Object> view(@PathVariable String code,Principal p){PokerTable t=rooms.get(code);synchronized(t){t.member(p.getName());rooms.touch(p.getName());return t.view(p.getName());}}
     @PostMapping("/{code}/ready") public Map<String,Object> ready(@PathVariable String code,@RequestBody Ready input,Principal p){PokerTable t=rooms.get(code);synchronized(t){PokerTable.require(!t.running(),"핸드 중에는 준비를 변경할 수 없습니다");t.member(p.getName()).ready=input.ready();t.version++;rooms.notify(t);return t.view(p.getName());}}
     @PostMapping("/{code}/showdown") public Map<String,Object> showdown(@PathVariable String code,@RequestBody Showdown input,Principal p){PokerTable t=rooms.get(code);synchronized(t){t.showdown(p.getName(),input.showdown());rooms.notify(t);return t.view(p.getName());}}
+    @PostMapping("/{code}/chat") public Map<String,Object> chat(@PathVariable String code,@Valid @RequestBody Chat input,Principal p){PokerTable t=rooms.get(code);synchronized(t){t.chat(p.getName(),input.text());rooms.notify(t);return t.view(p.getName());}}
     @PostMapping("/{code}/start") public Map<String,Object> start(@PathVariable String code,Principal p){PokerTable t=rooms.get(code);synchronized(t){t.start(p.getName());rooms.notify(t);return t.view(p.getName());}}
     @PostMapping("/{code}/blinds") public Map<String,Object> blinds(@PathVariable String code,@Valid @RequestBody Blinds input,Principal p){PokerTable t=rooms.get(code);synchronized(t){t.blinds(p.getName(),input.sb(),input.bb());rooms.notify(t);return t.view(p.getName());}}
     @PostMapping("/{code}/actions") public Map<String,Object> action(@PathVariable String code,@Valid @RequestBody Action input,Principal p){PokerTable t=rooms.get(code);synchronized(t){t.member(p.getName());var seen=receipts.computeIfAbsent(t.code,k->new LinkedHashMap<>());String key=p.getName()+input.commandId(),payload=input.toString();if(seen.containsKey(key)){PokerTable.require(seen.get(key).equals(payload),"중복 명령 ID의 내용이 다릅니다");return t.view(p.getName());}t.action(p.getName(),input.action(),input.amountTo(),input.version(),input.hand());seen.put(key,payload);if(seen.size()>1000)seen.remove(seen.keySet().iterator().next());rooms.notify(t);return t.view(p.getName());}}

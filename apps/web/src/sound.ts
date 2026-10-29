@@ -364,6 +364,26 @@ class SoundEngine {
     osc.start(t0);
     osc.stop(t0 + 0.08);
   }
+
+  /** Soft bubble pop when a chat message arrives. */
+  chat(): void {
+    const ctx = this.context();
+    if (!ctx) return;
+    this.record('chat');
+    const t0 = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(520, t0);
+    osc.frequency.exponentialRampToValueAtTime(760, t0 + 0.05);
+    gain.gain.setValueAtTime(0.001, t0);
+    gain.gain.linearRampToValueAtTime(0.065, t0 + 0.006);
+    gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.06);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(t0);
+    osc.stop(t0 + 0.065);
+  }
 }
 
 export const sound = new SoundEngine();

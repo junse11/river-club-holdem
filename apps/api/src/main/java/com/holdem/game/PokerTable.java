@@ -17,11 +17,11 @@ public class PokerTable {
     public String host;
     public final List<Player> players=new ArrayList<>();
     public final List<String> board=new ArrayList<>();
-    public final List<Map<String,Object>> log=new ArrayList<>(), history=new ArrayList<>();
+    public final List<Map<String,Object>> log=new ArrayList<>(), history=new ArrayList<>(), chatLog=new ArrayList<>();
     private final Deque<String> deck=new ArrayDeque<>();
     private final Set<String> pending=new HashSet<>();
     private long bankroll;
-    public long sb=50,bb=100,currentBet=0,lastRaise=100,version=0,hand=0,deadline=0,nextHandAt=0;
+    public long sb=50,bb=100,currentBet=0,lastRaise=100,version=0,hand=0,deadline=0,nextHandAt=0,runoutAt=0;
     public Long pendingSb, pendingBb;
     public int button=-1, actor=-1;
     public String street="WAITING", result="";
@@ -46,7 +46,7 @@ public class PokerTable {
         if(pendingSb!=null){sb=pendingSb;bb=pendingBb;pendingSb=null;pendingBb=null;}
         if(resetPending){invariant();for(Player p:players)p.stack=100*bb;bankroll=players.stream().mapToLong(p->p.stack).sum();resetPending=false;}
         List<Player> active=players.stream().filter(p->!p.leaving&&p.ready&&p.stack>0).toList();
-        hand++;board.clear();log.clear();bountyAwards=List.of();result="";currentBet=0;lastRaise=bb;pending.clear();nextHandAt=0;
+        hand++;board.clear();log.clear();bountyAwards=List.of();result="";currentBet=0;lastRaise=bb;pending.clear();nextHandAt=0;runoutAt=0;
         for(Player p:players){p.inHand=active.contains(p);p.folded=!p.inHand;p.showdown=false;p.bet=0;p.committed=0;p.lastActedAt=-1;p.cards.clear();}
         button=nextSeat(button,p->p.inHand);assignPositions(); List<String> shuffled=new ArrayList<>();for(String suit:List.of("C","D","H","S"))for(int r=2;r<=14;r++)shuffled.add(r+suit);
         Collections.shuffle(shuffled,new SecureRandom());deck.clear();deck.addAll(shuffled);
@@ -76,20 +76,24 @@ public class PokerTable {
         if(target>currentBet){require(mayRaise(p),"레이즈가 다시 열리지 않았습니다");long raise=target-currentBet;if(raise>=lastRaise)lastRaise=raise;currentBet=target;players.stream().filter(this::canAct).filter(other->other!=p).forEach(other->pending.add(other.id));}
         pay(p,target-p.bet);p.lastActedAt=currentBet;pending.remove(id);log.add(Map.of("nickname",p.nickname,"action",action,"amountTo",target,"street",street));version++;actor=nextSeat(p.seat,q->pending.contains(q.id)&&canAct(q));advanceIfDone();setDeadline();invariant();
     }
+    private void dealNextStreet(){
+        for(Player p:players){p.bet=0;p.lastActedAt=-1;}currentBet=0;lastRaise=bb;
+        deck.removeFirst();if(street.equals("PREFLOP")){street="FLOP";for(int i=0;i<3;i++)board.add(deck.removeFirst());}else{street=street.equals("FLOP")?"TURN":"RIVER";board.add(deck.removeFirst());}
+    }
     private void advanceIfDone(){
-        List<Player> alive=players.stream().filter(p->p.inHand&&!p.folded).toList();if(alive.size()==1){settle();return;}
+        List<Player> alive=players.stream().filter(p->p.inHand&&!p.folded).toList();if(alive.size()==1){runoutAt=0;settle();return;}
         pending.removeIf(id->!canAct(member(id)));
         List<Player> capable=players.stream().filter(this::canAct).toList();
         if(capable.size()==1&&capable.getFirst().bet>=currentBet)pending.clear();
         if(!pending.isEmpty()){if(actor<0||!pending.contains(at(actor).id))actor=nextSeat(button,p->pending.contains(p.id));return;}
+        if(capable.size()<=1){for(Player p:players){p.bet=0;p.lastActedAt=-1;}currentBet=0;actor=-1;deadline=0;runoutAt=System.currentTimeMillis()+1150;return;}
         if(street.equals("RIVER")){settle();return;}
-        for(Player p:players){p.bet=0;p.lastActedAt=-1;}currentBet=0;lastRaise=bb;
-        deck.removeFirst();if(street.equals("PREFLOP")){street="FLOP";for(int i=0;i<3;i++)board.add(deck.removeFirst());}else{street=street.equals("FLOP")?"TURN":"RIVER";board.add(deck.removeFirst());}
-        players.stream().filter(this::canAct).forEach(p->pending.add(p.id));actor=nextSeat(button,p->pending.contains(p.id));advanceIfDoneIfAllIn();
+        dealNextStreet();
+        players.stream().filter(this::canAct).forEach(p->pending.add(p.id));actor=nextSeat(button,p->pending.contains(p.id));
     }
-    private void advanceIfDoneIfAllIn(){if(players.stream().filter(this::canAct).count()<=1){pending.clear();advanceIfDone();}}
     void settle(){
         if(!running())return;
+        runoutAt=0;
         Map<String,List<Player>> lastPotWinners=new HashMap<>();
         List<Map<String,Object>> payouts=new ArrayList<>();TreeSet<Long> levels=new TreeSet<>();players.stream().filter(p->p.committed>0).forEach(p->levels.add(p.committed));long previous=0;
         for(long level:levels){final long threshold=level;List<Player> contributors=players.stream().filter(p->p.committed>=threshold).toList();long pot=(level-previous)*contributors.size();previous=level;
@@ -113,23 +117,29 @@ public class PokerTable {
         bountyAwards=List.copyOf(awards);resetPending=!awards.isEmpty();
         if(resetPending)result+=" · 바운티 획득! 다음 핸드 전원 100BB 리셋";
         Map<String,Object> record=new HashMap<>();record.put("hand",hand);record.put("board",List.copyOf(board));record.put("payouts",payouts);record.put("actions",List.copyOf(log));record.put("bounties",bountyAwards);record.put("resetToBb",resetPending?100:0);record.put("finalStacks",players.stream().map(p->Map.of("id",p.id,"stack",p.stack)).toList());history.add(record);if(history.size()>50)history.removeFirst();
-        for(Player p:players){p.bet=0;p.committed=0;p.showdown=false;}street="SETTLED";actor=-1;deadline=0;nextHandAt=System.currentTimeMillis()+7000;pending.clear();invariant();
+        for(Player p:players){p.bet=0;p.committed=0;p.showdown=false;}street="SETTLED";actor=-1;deadline=0;nextHandAt=System.currentTimeMillis()+4000;pending.clear();invariant();
     }
     public void showdown(String id,boolean reveal){
         require(street.equals("SETTLED"),"핸드 종료 후에만 쇼다운 여부를 선택할 수 있습니다");
         Player p=member(id);require(!p.cards.isEmpty(),"공개할 홀 카드가 없습니다");
         p.showdown=reveal;
-        if(reveal&&nextHandAt>0)nextHandAt=Math.max(nextHandAt,System.currentTimeMillis()+4000);
+        version++;
+    }
+    public void chat(String id,String text){
+        Player p=member(id);String trimmed=text==null?"":text.strip();
+        require(!trimmed.isEmpty()&&trimmed.length()<=120,"채팅 메시지는 1~120자입니다");
+        chatLog.add(Map.of("id",UUID.randomUUID().toString(),"userId",p.id,"nickname",p.nickname,"text",trimmed,"time",System.currentTimeMillis()));
+        if(chatLog.size()>60)chatLog.removeFirst();
         version++;
     }
     private List<String> combined(Player p){List<String> c=new ArrayList<>(board);c.addAll(p.cards);return c;}
     public void leave(String id){Player p=member(id);if(running()&&p.inHand&&!p.folded){p.leaving=true;p.folded=true;pending.remove(id);if(actor==p.seat)actor=nextSeat(p.seat,q->pending.contains(q.id)&&canAct(q));version++;advanceIfDone();setDeadline();}else p.leaving=true;cleanup();}
     public void cleanup(){if(running())return;for(Player p:new ArrayList<>(players))if(p.leaving){bankroll-=p.stack;players.remove(p);}if(players.stream().noneMatch(p->p.id.equals(host))&&!players.isEmpty())host=players.getFirst().id;}
-    public void tick(long now){if(running()&&deadline>0&&now>=deadline){Player p=at(actor);action(p.id,p.bet>=currentBet?"CHECK":"FOLD",null,version,hand);return;}if(!running()){cleanup();if(nextHandAt>0&&now>=nextHandAt){nextHandAt=0;if(players.stream().filter(p->p.ready&&(p.stack>0||resetPending)).count()>=2)begin();else{street="WAITING";version++;}}}}
-    private void setDeadline(){deadline=running()?System.currentTimeMillis()+30000:0;}
+    public void tick(long now){if(running()){if(runoutAt>0&&now>=runoutAt){runoutAt=0;if(street.equals("RIVER"))settle();else{dealNextStreet();actor=-1;deadline=0;runoutAt=now+1150;}version++;return;}if(deadline>0&&now>=deadline&&actor>=0){Player p=at(actor);action(p.id,p.bet>=currentBet?"CHECK":"FOLD",null,version,hand);return;}return;}cleanup();if(nextHandAt>0&&now>=nextHandAt){nextHandAt=0;if(players.stream().filter(p->p.ready&&(p.stack>0||resetPending)).count()>=2)begin();else{street="WAITING";version++;}}}
+    private void setDeadline(){deadline=running()&&actor>=0?System.currentTimeMillis()+30000:0;}
     private void assignPositions(){List<Player> order=new ArrayList<>();int seat=button;do{order.add(at(seat));seat=nextSeat(seat,q->q.inHand);}while(seat!=button&&order.size()<6);String[][]names={{},{},{"BTN / SB","BB"},{"BTN","SB","BB"},{"BTN","SB","BB","CO"},{"BTN","SB","BB","UTG","CO"},{"BTN","SB","BB","UTG","HJ","CO"}};for(Player p:players)p.position=p.inHand?names[order.size()][order.indexOf(p)]:"WAIT";}
     public String position(Player p){return p.position;}
-    public Map<String,Object> view(String user){member(user);Map<String,Object> v=new HashMap<>();v.put("code",code);v.put("name",name);v.put("host",host);v.put("version",version);v.put("hand",hand);v.put("street",street);v.put("board",List.copyOf(board));v.put("sb",sb);v.put("bb",bb);v.put("currentBet",currentBet);v.put("minRaiseTo",currentBet+lastRaise);v.put("pot",players.stream().mapToLong(p->p.committed).sum());v.put("actor",actor);v.put("deadline",deadline);v.put("result",result);v.put("resetPending",resetPending);v.put("resetStackBb",100);v.put("bountyAwards",bountyAwards);v.put("pendingBlinds",pendingSb==null?List.of():List.of(pendingSb,pendingBb));v.put("allowedActions",allowed(user));v.put("log",List.copyOf(log));
+    public Map<String,Object> view(String user){member(user);Map<String,Object> v=new HashMap<>();v.put("code",code);v.put("name",name);v.put("host",host);v.put("version",version);v.put("hand",hand);v.put("street",street);v.put("board",List.copyOf(board));v.put("sb",sb);v.put("bb",bb);v.put("currentBet",currentBet);v.put("minRaiseTo",currentBet+lastRaise);v.put("pot",players.stream().mapToLong(p->p.committed).sum());v.put("actor",actor);v.put("deadline",deadline);v.put("result",result);v.put("resetPending",resetPending);v.put("resetStackBb",100);v.put("bountyAwards",bountyAwards);v.put("pendingBlinds",pendingSb==null?List.of():List.of(pendingSb,pendingBb));v.put("allowedActions",allowed(user));v.put("log",List.copyOf(log));v.put("chat",List.copyOf(chatLog));
         v.put("players",players.stream().map(p->{Map<String,Object> m=new HashMap<>();m.put("id",p.id);m.put("nickname",p.nickname);m.put("seat",p.seat);m.put("stack",p.stack);m.put("bountyUnits",p.bountyUnits);m.put("bounty",p.bountyUnits/(double)BOUNTY_UNITS);m.put("bet",p.bet);m.put("ready",p.ready);m.put("folded",p.folded);m.put("showdown",p.showdown);m.put("position",position(p));m.put("cards",p.id.equals(user)||(street.equals("SETTLED")&&p.showdown)?List.copyOf(p.cards):List.of());m.put("cardCount",p.cards.size());return m;}).toList());return v;
     }
     public void invariant(){require(players.stream().allMatch(p->p.stack>=0&&p.bet>=0&&p.committed>=0),"음수 스택");require(players.stream().mapToLong(p->p.stack+p.committed).sum()==bankroll,"칩 보존 위반");}

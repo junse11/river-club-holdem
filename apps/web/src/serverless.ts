@@ -80,8 +80,19 @@ type InternalPlayer = {
 
 const BOUNTY_UNITS = 60;
 
+export type SavedRoomSummary = {
+  code: string;
+  name: string;
+  sb: number;
+  bb: number;
+  hand: number;
+  updatedAt: number;
+  players: { nickname: string; bounty: number; stack: number }[];
+};
+
 export class LocalPokerTable {
   players: InternalPlayer[] = [];
+  archivedPlayers: InternalPlayer[] = [];
   board: string[] = [];
   log: { nickname: string; action: string; amountTo: number; street: string }[] = [];
   chatLog: ChatMessage[] = [];
@@ -106,9 +117,130 @@ export class LocalPokerTable {
   resetPending = false;
   bountyAwards: BountyAward[] = [];
   password = '';
+  updatedAt = Date.now();
 
   constructor(public code: string, public name: string, public host: string, password = '') {
     this.password = password;
+  }
+
+  toJSON(): Record<string, unknown> {
+    return {
+      code: this.code,
+      name: this.name,
+      host: this.host,
+      password: this.password,
+      players: this.players,
+      archivedPlayers: this.archivedPlayers,
+      board: this.board,
+      log: this.log,
+      chatLog: this.chatLog,
+      history: this.history,
+      deck: this.deck,
+      pending: [...this.pending],
+      sb: this.sb,
+      bb: this.bb,
+      currentBet: this.currentBet,
+      lastRaise: this.lastRaise,
+      version: this.version,
+      hand: this.hand,
+      deadline: this.deadline,
+      nextHandAt: this.nextHandAt,
+      runoutAt: this.runoutAt,
+      pendingSb: this.pendingSb,
+      pendingBb: this.pendingBb,
+      button: this.button,
+      actor: this.actor,
+      street: this.street,
+      result: this.result,
+      resetPending: this.resetPending,
+      bountyAwards: this.bountyAwards,
+      updatedAt: this.updatedAt,
+    };
+  }
+
+  static fromJSON(raw: Record<string, unknown>): LocalPokerTable {
+    const t = new LocalPokerTable(
+      String(raw.code ?? ''),
+      String(raw.name ?? '포커 테이블'),
+      String(raw.host ?? ''),
+      String(raw.password ?? '')
+    );
+    t.players = Array.isArray(raw.players) ? (raw.players as InternalPlayer[]).map(p => ({
+      ...p,
+      bountyLog: Array.isArray(p.bountyLog) ? p.bountyLog : [],
+      cards: Array.isArray(p.cards) ? p.cards : [],
+    })) : [];
+    t.archivedPlayers = Array.isArray(raw.archivedPlayers) ? (raw.archivedPlayers as InternalPlayer[]).map(p => ({
+      ...p,
+      bountyLog: Array.isArray(p.bountyLog) ? p.bountyLog : [],
+      cards: [],
+    })) : [];
+    t.board = Array.isArray(raw.board) ? (raw.board as string[]) : [];
+    t.log = Array.isArray(raw.log) ? (raw.log as { nickname: string; action: string; amountTo: number; street: string }[]) : [];
+    t.chatLog = Array.isArray(raw.chatLog) ? (raw.chatLog as ChatMessage[]) : [];
+    t.history = Array.isArray(raw.history) ? (raw.history as Review[]) : [];
+    t.deck = Array.isArray(raw.deck) ? (raw.deck as string[]) : [];
+    t.pending = new Set(Array.isArray(raw.pending) ? (raw.pending as string[]) : []);
+    t.sb = Number(raw.sb ?? 50);
+    t.bb = Number(raw.bb ?? 100);
+    t.currentBet = Number(raw.currentBet ?? 0);
+    t.lastRaise = Number(raw.lastRaise ?? t.bb);
+    t.version = Number(raw.version ?? 0);
+    t.hand = Number(raw.hand ?? 0);
+    const now = Date.now();
+    t.deadline = Number(raw.deadline ?? 0);
+    if (t.deadline > 0 && t.deadline < now + 5000) t.deadline = now + 30000;
+    t.nextHandAt = Number(raw.nextHandAt ?? 0);
+    t.runoutAt = Number(raw.runoutAt ?? 0);
+    if (t.runoutAt > 0 && t.runoutAt < now + 1000) t.runoutAt = now + 3000;
+    t.pendingSb = raw.pendingSb != null ? Number(raw.pendingSb) : null;
+    t.pendingBb = raw.pendingBb != null ? Number(raw.pendingBb) : null;
+    t.button = Number(raw.button ?? -1);
+    t.actor = Number(raw.actor ?? -1);
+    t.street = String(raw.street ?? 'WAITING');
+    t.result = String(raw.result ?? '');
+    t.resetPending = Boolean(raw.resetPending);
+    t.bountyAwards = Array.isArray(raw.bountyAwards) ? (raw.bountyAwards as BountyAward[]) : [];
+    t.updatedAt = Number(raw.updatedAt ?? now);
+    return t;
+  }
+
+  static fromTableSnapshot(snap: Table, history: Review[] = []): LocalPokerTable {
+    const t = new LocalPokerTable(snap.code, snap.name, snap.host, '');
+    t.sb = snap.sb;
+    t.bb = snap.bb;
+    t.hand = snap.hand;
+    t.version = snap.version + 1;
+    t.street = 'WAITING';
+    t.board = [];
+    t.result = '이전 방 기록을 불러왔습니다 · 모두 준비하면 이어서 시작합니다';
+    t.resetPending = snap.resetPending;
+    t.bountyAwards = snap.bountyAwards ?? [];
+    t.chatLog = snap.chat ? [...snap.chat] : [];
+    t.history = [...history];
+    t.players = snap.players.map(p => ({
+      id: p.id,
+      nickname: p.nickname,
+      seat: p.seat,
+      stack: p.stack > 0 ? p.stack + (p.bet ?? 0) : 100 * snap.bb,
+      bet: 0,
+      committed: 0,
+      bountyUnits: p.bountyUnits ?? Math.round((p.bounty ?? 0) * BOUNTY_UNITS),
+      bountyLog: (p.bountyVictims ?? []).map(v => ({
+        victimNickname: v.nickname,
+        units: Math.round(v.amount * BOUNTY_UNITS),
+      })),
+      lastActedAt: -1,
+      ready: false,
+      folded: false,
+      inHand: false,
+      leaving: false,
+      showdown: false,
+      position: p.position || 'BTN',
+      cards: [],
+    }));
+    t.assignPreviewPositions();
+    return t;
   }
 
   private req(cond: boolean, msg: string): void {
@@ -146,17 +278,35 @@ export class LocalPokerTable {
       return;
     }
     this.req(this.players.length < 6, '방이 가득 찼습니다');
-    let seat = 0;
+    const archivedIdx = this.archivedPlayers.findIndex(
+      p => p.id === id || (normNick.length > 0 && p.nickname.trim().toLowerCase() === normNick)
+    );
+    const archived = archivedIdx >= 0 ? this.archivedPlayers.splice(archivedIdx, 1)[0] : undefined;
     const used = new Set(this.players.map(p => p.seat));
+    let seat = archived && !used.has(archived.seat) ? archived.seat : 0;
     while (used.has(seat)) seat++;
     this.players.push({
-      id, nickname: nickname.trim(), seat, stack: buyin, bet: 0, committed: 0, bountyUnits: 0, bountyLog: [],
-      lastActedAt: -1, ready: false, folded: false, inHand: false, leaving: false,
-      showdown: false, position: 'BTN', cards: [],
+      id,
+      nickname: nickname.trim(),
+      seat,
+      stack: archived && archived.stack > 0 ? archived.stack : buyin,
+      bet: 0,
+      committed: 0,
+      bountyUnits: archived ? archived.bountyUnits : 0,
+      bountyLog: archived ? archived.bountyLog : [],
+      lastActedAt: -1,
+      ready: false,
+      folded: false,
+      inHand: false,
+      leaving: false,
+      showdown: false,
+      position: 'BTN',
+      cards: [],
     });
     this.players.sort((a, b) => a.seat - b.seat);
     if (!this.running()) this.assignPreviewPositions();
     this.version++;
+    this.updatedAt = Date.now();
   }
 
   chat(id: string, text: string): void {
@@ -481,6 +631,15 @@ export class LocalPokerTable {
 
   cleanup(): void {
     if (this.running()) return;
+    for (const p of this.players) {
+      if (p.leaving) {
+        const norm = p.nickname.trim().toLowerCase();
+        this.archivedPlayers = this.archivedPlayers.filter(
+          a => a.id !== p.id && a.nickname.trim().toLowerCase() !== norm
+        );
+        this.archivedPlayers.push({ ...p, leaving: false, ready: false, inHand: false, folded: false, bet: 0, committed: 0, cards: [] });
+      }
+    }
     this.players = this.players.filter(p => !p.leaving);
     if (!this.players.some(p => p.id === this.host) && this.players.length > 0) {
       this.host = this.players[0].id;
@@ -607,9 +766,14 @@ export class LocalPokerTable {
 type RpcRequest = { id: string; userId: string; nickname: string; path: string; body?: unknown };
 type RpcResponse = { id: string; ok: boolean; data?: unknown; error?: string };
 
+const STORAGE_TABLES_KEY = 'river:p2p:tables:v1';
+const STORAGE_SNAPSHOTS_KEY = 'river:p2p:snapshots:v1';
+
 class ServerlessCoordinator {
   private hostedTables = new Map<string, LocalPokerTable>();
+  private savedSnapshots = new Map<string, { table: Table; history: Review[]; updatedAt: number }>();
   private hostPeers = new Map<string, Peer>();
+  private hostPeerRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private connUsers = new Map<DataConnection, string>();
   private clientConns = new Map<string, DataConnection>();
   private clientConnPromises = new Map<string, Promise<DataConnection>>();
@@ -621,6 +785,7 @@ class ServerlessCoordinator {
   private bc: BroadcastChannel | null = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('river-club-p2p') : null;
 
   constructor() {
+    this.loadPersistedState();
     if (this.bc) {
       this.bc.onmessage = ev => {
         const msg = ev.data;
@@ -652,12 +817,123 @@ class ServerlessCoordinator {
     }, 300);
   }
 
+  private loadPersistedState(): void {
+    try {
+      const rawTables = localStorage.getItem(STORAGE_TABLES_KEY);
+      if (rawTables) {
+        const parsed = JSON.parse(rawTables) as Record<string, Record<string, unknown>>;
+        for (const [code, data] of Object.entries(parsed)) {
+          const table = LocalPokerTable.fromJSON(data);
+          this.hostedTables.set(code.toUpperCase(), table);
+        }
+      }
+    } catch {}
+    try {
+      const rawSnaps = localStorage.getItem(STORAGE_SNAPSHOTS_KEY);
+      if (rawSnaps) {
+        const parsed = JSON.parse(rawSnaps) as Record<string, { table: Table; history: Review[]; updatedAt: number }>;
+        for (const [code, snap] of Object.entries(parsed)) {
+          if (snap?.table) this.savedSnapshots.set(code.toUpperCase(), snap);
+        }
+      }
+    } catch {}
+    try {
+      const activeCode = (sessionStorage.getItem('river:room') || localStorage.getItem('river:room') || '').trim().toUpperCase();
+      if (activeCode && this.hostedTables.has(activeCode)) {
+        this.setupHostPeer(activeCode);
+      }
+    } catch {}
+  }
+
+  private savePersistedTables(): void {
+    try {
+      const entries = [...this.hostedTables.entries()]
+        .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
+        .slice(0, 15);
+      const obj: Record<string, unknown> = {};
+      for (const [code, t] of entries) {
+        obj[code] = t.toJSON();
+      }
+      localStorage.setItem(STORAGE_TABLES_KEY, JSON.stringify(obj));
+    } catch {}
+  }
+
+  private saveClientSnapshot(table: Table, history?: Review[]): void {
+    try {
+      const code = table.code.toUpperCase();
+      const existing = this.savedSnapshots.get(code);
+      this.savedSnapshots.set(code, {
+        table,
+        history: history ?? existing?.history ?? [],
+        updatedAt: Date.now(),
+      });
+      const entries = [...this.savedSnapshots.entries()]
+        .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
+        .slice(0, 15);
+      const obj: Record<string, unknown> = {};
+      for (const [c, snap] of entries) obj[c] = snap;
+      localStorage.setItem(STORAGE_SNAPSHOTS_KEY, JSON.stringify(obj));
+    } catch {}
+  }
+
+  getSavedRooms(): SavedRoomSummary[] {
+    const map = new Map<string, SavedRoomSummary>();
+    for (const [code, snap] of this.savedSnapshots.entries()) {
+      const tbl = snap.table;
+      map.set(code, {
+        code,
+        name: tbl.name,
+        sb: tbl.sb,
+        bb: tbl.bb,
+        hand: tbl.hand,
+        updatedAt: snap.updatedAt,
+        players: tbl.players.map(p => ({ nickname: p.nickname, bounty: p.bounty, stack: p.stack })),
+      });
+    }
+    for (const [code, t] of this.hostedTables.entries()) {
+      const allPlayers = [...t.players, ...t.archivedPlayers];
+      map.set(code, {
+        code,
+        name: t.name,
+        sb: t.sb,
+        bb: t.bb,
+        hand: t.hand,
+        updatedAt: t.updatedAt,
+        players: allPlayers.map(p => ({ nickname: p.nickname, bounty: p.bountyUnits / BOUNTY_UNITS, stack: p.stack })),
+      });
+    }
+    return [...map.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  removeSavedRoom(code: string): void {
+    const norm = code.trim().toUpperCase();
+    this.hostedTables.delete(norm);
+    this.savedSnapshots.delete(norm);
+    const peer = this.hostPeers.get(norm);
+    if (peer) {
+      try { peer.destroy(); } catch {}
+      this.hostPeers.delete(norm);
+    }
+    const timer = this.hostPeerRetryTimers.get(norm);
+    if (timer) {
+      clearTimeout(timer);
+      this.hostPeerRetryTimers.delete(norm);
+    }
+    this.savePersistedTables();
+    try {
+      const obj: Record<string, unknown> = {};
+      for (const [c, snap] of this.savedSnapshots.entries()) obj[c] = snap;
+      localStorage.setItem(STORAGE_SNAPSHOTS_KEY, JSON.stringify(obj));
+    } catch {}
+  }
+
   onUpdate(fn: (table?: Table) => void): () => void {
     this.updateListeners.add(fn);
     return () => this.updateListeners.delete(fn);
   }
 
   private emitUpdate(table?: Table): void {
+    if (table) this.saveClientSnapshot(table);
     this.updateListeners.forEach(fn => fn(table));
   }
 
@@ -694,11 +970,16 @@ class ServerlessCoordinator {
 
   private broadcastTableUpdate(code: string): void {
     const t = this.hostedTables.get(code);
+    if (t) {
+      t.updatedAt = Date.now();
+      this.savePersistedTables();
+    }
     const hostUser = this.getUser();
     let hostView: Table | undefined;
     if (t && hostUser && t.players.some(p => p.id === hostUser.id)) {
       try { hostView = t.view(hostUser.id); } catch {}
     }
+    if (hostView && t) this.saveClientSnapshot(hostView, t.history);
     this.emitUpdate(hostView);
     this.bc?.postMessage({ type: 'notify', code });
     const peer = this.hostPeers.get(code);
@@ -717,12 +998,39 @@ class ServerlessCoordinator {
     }
   }
 
+  private scheduleHostPeerRetry(code: string, delayMs = 2000): void {
+    if (this.hostPeerRetryTimers.has(code) || !this.hostedTables.has(code)) return;
+    const timer = setTimeout(() => {
+      this.hostPeerRetryTimers.delete(code);
+      if (this.hostedTables.has(code)) this.setupHostPeer(code);
+    }, delayMs);
+    this.hostPeerRetryTimers.set(code, timer);
+  }
+
   private setupHostPeer(code: string): void {
-    if (this.hostPeers.has(code)) return;
+    const existing = this.hostPeers.get(code);
+    if (existing && !existing.destroyed) {
+      if (existing.disconnected) {
+        try { existing.reconnect(); } catch {}
+      }
+      return;
+    }
+    this.hostPeers.delete(code);
     try {
       const peer = new Peer(`river-club-room-${code}`);
       peer.on('disconnected', () => {
-        try { peer.reconnect(); } catch {}
+        if (!peer.destroyed) {
+          try { peer.reconnect(); } catch {}
+        }
+      });
+      peer.on('error', () => {
+        if (this.hostPeers.get(code) === peer) this.hostPeers.delete(code);
+        try { peer.destroy(); } catch {}
+        this.scheduleHostPeerRetry(code, 2200);
+      });
+      peer.on('close', () => {
+        if (this.hostPeers.get(code) === peer) this.hostPeers.delete(code);
+        this.scheduleHostPeerRetry(code, 2200);
       });
       peer.on('connection', conn => {
         conn.on('data', raw => {
@@ -740,7 +1048,9 @@ class ServerlessCoordinator {
         });
       });
       this.hostPeers.set(code, peer);
-    } catch {}
+    } catch {
+      this.scheduleHostPeerRetry(code, 2500);
+    }
   }
 
   private async ensureClientPeer(): Promise<Peer> {
@@ -756,7 +1066,7 @@ class ServerlessCoordinator {
       const timer = setTimeout(() => {
         this.clientPeerPromise = null;
         reject(new Error('P2P 신호 서버 연결 시간 초과'));
-      }, 7000);
+      }, 6000);
       p.once('open', () => {
         clearTimeout(timer);
         this.clientPeer = p;
@@ -779,35 +1089,47 @@ class ServerlessCoordinator {
     if (inflight) return inflight;
 
     const promise = (async () => {
-      const peer = await this.ensureClientPeer();
-      const conn = peer.connect(`river-club-room-${code}`, { reliable: true, serialization: 'json' });
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('방 호스트와 연결하지 못했습니다. 코드를 확인해주세요.')), 7000);
-        conn.once('open', () => { clearTimeout(timer); resolve(); });
-        conn.once('error', err => { clearTimeout(timer); reject(err); });
-      });
-      conn.on('data', raw => {
-        const msg = raw as { type?: string; table?: Table; res?: RpcResponse };
-        if (msg?.type === 'notify') {
-          this.emitUpdate(msg.table);
-        } else if (msg?.type === 'rpc-res' && msg.res) {
-          const pending = this.pendingRpc.get(msg.res.id);
-          if (pending) {
-            this.pendingRpc.delete(msg.res.id);
-            if (msg.res.ok) pending.resolve(msg.res.data);
-            else pending.reject(new Error(msg.res.error ?? '요청 실패'));
-          }
+      let lastErr: unknown;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const peer = await this.ensureClientPeer();
+          const conn = peer.connect(`river-club-room-${code}`, { reliable: true, serialization: 'json' });
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              try { conn.close(); } catch {}
+              reject(new Error('방 호스트와 연결하지 못했습니다. 잠시 후 다시 시도하거나 방을 다시 열어주세요.'));
+            }, 4500);
+            conn.once('open', () => { clearTimeout(timer); resolve(); });
+            conn.once('error', err => { clearTimeout(timer); reject(err); });
+          });
+          conn.on('data', raw => {
+            const msg = raw as { type?: string; table?: Table; res?: RpcResponse };
+            if (msg?.type === 'notify') {
+              this.emitUpdate(msg.table);
+            } else if (msg?.type === 'rpc-res' && msg.res) {
+              const pending = this.pendingRpc.get(msg.res.id);
+              if (pending) {
+                this.pendingRpc.delete(msg.res.id);
+                if (msg.res.ok) pending.resolve(msg.res.data);
+                else pending.reject(new Error(msg.res.error ?? '요청 실패'));
+              }
+            }
+          });
+          conn.on('close', () => {
+            if (this.clientConns.get(code) === conn) this.clientConns.delete(code);
+          });
+          conn.on('error', () => {
+            if (this.clientConns.get(code) === conn) this.clientConns.delete(code);
+          });
+          this.clientConns.set(code, conn);
+          this.remoteRooms.add(code);
+          return conn;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < 2) await new Promise(r => setTimeout(r, 1200));
         }
-      });
-      conn.on('close', () => {
-        if (this.clientConns.get(code) === conn) this.clientConns.delete(code);
-      });
-      conn.on('error', () => {
-        if (this.clientConns.get(code) === conn) this.clientConns.delete(code);
-      });
-      this.clientConns.set(code, conn);
-      this.remoteRooms.add(code);
-      return conn;
+      }
+      throw lastErr instanceof Error ? lastErr : new Error('방 호스트와 연결하지 못했습니다');
     })();
 
     this.clientConnPromises.set(code, promise);
@@ -823,6 +1145,7 @@ class ServerlessCoordinator {
       const code = this.extractCode(req.path)!;
       const t = this.hostedTables.get(code);
       if (!t) throw new Error('방 코드를 확인해주세요');
+      this.setupHostPeer(code);
 
       if (req.path.startsWith('/api/invitations/')) {
         const info: InvitationInfo = {
@@ -842,7 +1165,13 @@ class ServerlessCoordinator {
       const body = (req.body ?? {}) as Record<string, unknown>;
 
       if (sub === '') {
-        return { id: req.id, ok: true, data: t.view(req.userId) };
+        if (req.userId && req.userId !== 'anon' && !t.players.some(p => p.id === req.userId)) {
+          t.join(req.userId, req.nickname || 'Player', 100 * t.bb);
+          this.broadcastTableUpdate(code);
+        }
+        const view = t.view(req.userId);
+        this.savePersistedTables();
+        return { id: req.id, ok: true, data: view };
       }
       if (sub === '/join') {
         const nick = String(body.nickname ?? req.nickname).trim();
@@ -903,6 +1232,22 @@ class ServerlessCoordinator {
     }
   }
 
+  private promoteSnapshotToHosted(code: string, currentUser: User): boolean {
+    if (this.hostedTables.has(code)) return true;
+    const snap = this.savedSnapshots.get(code);
+    if (!snap?.table) return false;
+    const restored = LocalPokerTable.fromTableSnapshot(snap.table, snap.history);
+    if (currentUser.id !== 'anon') {
+      restored.host = currentUser.id;
+      restored.join(currentUser.id, currentUser.nickname, 100 * restored.bb);
+    }
+    this.hostedTables.set(code, restored);
+    this.remoteRooms.delete(code);
+    this.savePersistedTables();
+    this.setupHostPeer(code);
+    return true;
+  }
+
   async request<T>(path: string, body?: unknown): Promise<T> {
     if (path === '/api/auth/csrf') {
       return { headerName: 'X-CSRF-TOKEN', token: 'serverless' } as T;
@@ -938,8 +1283,11 @@ class ServerlessCoordinator {
       const table = new LocalPokerTable(code, String(b.name ?? `${user.nickname}의 테이블`), user.id, String(b.password ?? ''));
       table.join(user.id, user.nickname, 100 * table.bb);
       this.hostedTables.set(code, table);
+      this.savePersistedTables();
       this.setupHostPeer(code);
-      return table.view(user.id) as T;
+      const view = table.view(user.id);
+      this.saveClientSnapshot(view, table.history);
+      return view as T;
     }
 
     const code = this.extractCode(path);
@@ -976,20 +1324,32 @@ class ServerlessCoordinator {
       }
     }
 
-    // 3. Remote P2P via PeerJS WebRTC
-    const conn = await this.getClientConn(code);
-    const data = await new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRpc.delete(req.id);
-        reject(new Error('호스트 응답 시간 초과'));
-      }, 6000);
-      this.pendingRpc.set(req.id, {
-        resolve: val => { clearTimeout(timer); resolve(val); },
-        reject: err => { clearTimeout(timer); reject(err); },
+    // 3. Remote P2P via PeerJS WebRTC (with automatic local snapshot fallback if host is offline)
+    try {
+      const conn = await this.getClientConn(code);
+      const data = await new Promise<unknown>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pendingRpc.delete(req.id);
+          reject(new Error('호스트 응답 시간 초과'));
+        }, 6000);
+        this.pendingRpc.set(req.id, {
+          resolve: val => { clearTimeout(timer); resolve(val); },
+          reject: err => { clearTimeout(timer); reject(err); },
+        });
+        conn.send({ type: 'rpc-req', req });
       });
-      conn.send({ type: 'rpc-req', req });
-    });
-    return data as T;
+      if (data && typeof data === 'object' && 'code' in (data as Record<string, unknown>) && 'players' in (data as Record<string, unknown>)) {
+        this.saveClientSnapshot(data as Table);
+      }
+      return data as T;
+    } catch (err) {
+      if (this.promoteSnapshotToHosted(code, user)) {
+        const res = this.handleLocalRpc(req);
+        if (!res.ok) throw new Error(res.error);
+        return res.data as T;
+      }
+      throw err;
+    }
   }
 }
 

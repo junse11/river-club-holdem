@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BOUNTY_UNITS, LocalPokerTable, evaluateHand, handLabel } from './engine';
 import type { InternalPlayer } from './engine';
 
@@ -254,6 +254,25 @@ describe('바운티 규칙: 쇼다운 1등만 획득 (BNT)', () => {
 });
 
 describe('쇼다운 / 일시정지 / 권한', () => {
+  it('정산 3초 후 자동 시작하며 일시정지 동안 남은 시간을 보존한다', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(100000);
+      const t=setup([{id:'A',stack:900,committed:100,cards:['14H','14S']},{id:'B',stack:900,committed:100,cards:['12H','12S']}],BOARD);
+      t.settle();
+      expect(t.nextHandAt).toBe(103000);
+      vi.setSystemTime(101000); t.showdown('B',true);
+      expect(t.nextHandAt).toBe(103000);
+      t.pause('A');
+      expect(t.pausedNextHandRem).toBe(2000);
+      vi.setSystemTime(120000); expect(t.tick(Date.now())).toBe(false);
+      t.pause('A'); expect(t.nextHandAt).toBe(122000);
+      const hand=t.hand;
+      expect(t.tick(121999)).toBe(false);
+      vi.setSystemTime(122000); t.tick(Date.now());
+      expect(t.hand).toBe(hand+1); expect(t.street).toBe('PREFLOP');
+    } finally { vi.useRealTimers(); }
+  });
   it('마지막 올인 콜 직후 폴드한 사람을 제외하고 보드가 깔리기 전에 패를 공개한다', () => {
     const t = setup([
       { id: 'A', stack: 100, committed: 0, cards: ['14H', '14S'] },

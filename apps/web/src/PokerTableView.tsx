@@ -91,7 +91,7 @@ export function PokerTableView({ table, userId, now, money, onKick, onTogglePaus
               <span>🔥 ALL-IN RUNOUT · 3초 간격 {table.street} 오픈 중 ({Math.max(1, seconds)}초)</span>
             )
           ) : table.street === 'SETTLED' ? (
-            <span>{table.result || '핸드 정산 완료 · 4초 후 다음 핸드'}</span>
+            <span>{table.result || '핸드 정산 완료 · 3초 후 다음 핸드'}</span>
           ) : (
             <span>{table.result || '플레이어 준비 대기 중'}</span>
           )}

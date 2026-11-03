@@ -10,6 +10,7 @@ const param = () => ({
 const node = () => ({ connect() {}, start() {}, stop() {}, frequency: param(), gain: param(), Q: param(), type: '' });
 
 class FakeAudioContext {
+  static samples: { at: number; duration?: number }[] = [];
   static created = 0;
   constructor() { FakeAudioContext.created++; }
   currentTime = 0;
@@ -18,7 +19,8 @@ class FakeAudioContext {
   destination = {};
   resume() { return Promise.resolve(); }
   createBuffer(_c: number, length: number) { return { getChannelData: () => new Float32Array(length) }; }
-  createBufferSource() { return { ...node(), buffer: null }; }
+  createBufferSource() { return { ...node(), buffer: null as unknown, start(at:number,_offset?:number,duration?:number) { if(this.buffer && (this.buffer as {sample?:boolean}).sample) FakeAudioContext.samples.push({at,duration}); } }; }
+  decodeAudioData() { return Promise.resolve({sample:true,duration:2}); }
   createBiquadFilter() { return node(); }
   createGain() { return node(); }
   createOscillator() { return node(); }
@@ -32,6 +34,7 @@ const last = () => sound.history.map(e => e.type);
 beforeAll(async () => {
   const store = new Map<string, string>();
   vi.stubGlobal('localStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) });
+  vi.stubGlobal('fetch', vi.fn(async()=>({ok:true,arrayBuffer:async()=>new ArrayBuffer(8)})));
   vi.stubGlobal('window', { AudioContext: FakeAudioContext, addEventListener(name: string, callback: () => void) { gestures.set(name, callback); } });
   sound = (await import('./sound')).sound;
 });
@@ -98,6 +101,28 @@ describe('보드 딜 타임라인 (AUD-002/003)', () => {
 });
 
 describe('효과음 끄기 (AUD-005)', () => {
+  it('첨부 음원 7개를 미리 읽고 베팅별 샘플을 재생한다', async () => {
+    await vi.waitFor(()=>expect(vi.mocked(fetch)).toHaveBeenCalledTimes(7));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    FakeAudioContext.samples=[];
+    sound.call(); sound.raise(); sound.allIn(); sound.dealHand();
+    expect(FakeAudioContext.samples.length).toBeGreaterThanOrEqual(7);
+    sound.setEnabled(false);
+    const count=FakeAudioContext.samples.length;
+    sound.call(); sound.dealHand(); sound.dealBoard(0,3);
+    expect(FakeAudioContext.samples).toHaveLength(count);
+    sound.setEnabled(true);
+  });
+  it('폴드 샘플은 한 번, 체크 샘플은 100ms 간격으로 두 번 재생한다', async () => {
+    await vi.waitFor(()=>expect(vi.mocked(fetch)).toHaveBeenCalledTimes(7));
+    FakeAudioContext.samples=[];
+    sound.fold();
+    expect(FakeAudioContext.samples).toHaveLength(1);
+    FakeAudioContext.samples=[];
+    sound.check();
+    expect(FakeAudioContext.samples).toHaveLength(2);
+    expect(FakeAudioContext.samples[1].at-FakeAudioContext.samples[0].at).toBeCloseTo(0.1);
+  });
   it('OFF면 어떤 이벤트도 기록/재생되지 않는다', () => {
     sound.setEnabled(false);
     sound.history.length = 0;

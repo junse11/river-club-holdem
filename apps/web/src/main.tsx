@@ -67,7 +67,7 @@ function App(){
   if((t.chat?.length??0)>(prev.chat?.length??0))sound.chat();
   if(t.hand!==prev.hand&&t.street==='PREFLOP'){
    sound.dealHand();
-   if(me&&t.actor===me.seat)sound.myTurn(260);
+   if(me&&t.actor===me.seat)sound.myTurn(1400);
    return;
   }
   if(t.hand===prev.hand){
@@ -188,7 +188,7 @@ function App(){
        <div className="controls pn-waiting-controls">
         <div className="pn-waiting-status">
          {t.street==='SETTLED'
-          ? (t.result || '핸드 정산 완료 · 4초 뒤 다음 핸드 자동 시작')
+          ? (t.paused?'일시정지 · 다음 핸드 자동 시작 대기':t.result || '핸드 정산 완료 · 3초 뒤 다음 핸드 자동 시작')
           : (t.result || '모두 준비하면 게임을 시작합니다')}
         </div>
         <div className="pn-waiting-btns">

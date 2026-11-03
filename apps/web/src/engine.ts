@@ -638,7 +638,7 @@ export class LocalPokerTable {
     this.street = 'SETTLED';
     this.actor = -1;
     this.deadline = 0;
-    this.nextHandAt = Date.now() + 4000;
+    this.nextHandAt = Date.now() + 3000;
     this.pending.clear();
   }
 
@@ -648,9 +648,6 @@ export class LocalPokerTable {
     this.req(p.cards.length > 0, '공개할 홀 카드가 없습니다');
     this.req(!this.allInShowdown || reveal, '올인 쇼다운에서는 패를 숨길 수 없습니다');
     p.showdown = reveal;
-    if (reveal && !this.paused && this.nextHandAt > 0) {
-      this.nextHandAt = Math.max(this.nextHandAt, Date.now() + 3000);
-    }
     this.version++;
   }
 

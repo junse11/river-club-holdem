@@ -1,8 +1,17 @@
-// Web Audio API synthesizer for River Club poker sound effects.
-// 외부 음원 파일 없이 노이즈 + 필터 + 짧은 공명으로 카지노 테이블 소리를 합성한다.
+// Attached recordings for table sounds; synthesized fallback and UI notifications.
 import { DEAL, boardTimeline } from './dealTimeline';
 
 const STORAGE_KEY = 'river:sound';
+const SAMPLE_URLS = {
+  card: new URL('./audio/card.mp3', import.meta.url).href,
+  allIn: new URL('./audio/all-in.mp3', import.meta.url).href,
+  shuffle: new URL('./audio/shuffle.mp3', import.meta.url).href,
+  nextHand: new URL('./audio/next-hand.mp3', import.meta.url).href,
+  bet: new URL('./audio/bet.mp3', import.meta.url).href,
+  fold: new URL('./audio/fold.mp3', import.meta.url).href,
+  check: new URL('./audio/check.mp3', import.meta.url).href,
+};
+type SampleName = keyof typeof SAMPLE_URLS;
 
 export type SoundEvent = { type: string; at: number };
 
@@ -12,6 +21,9 @@ class SoundEngine {
   private ctx: AudioContext | null = null;
   private enabled: boolean;
   private noiseCache = new Map<string, AudioBuffer>();
+  private samples = new Map<SampleName, AudioBuffer>();
+  private loadingSamples = false;
+  private activeSamples = new Set<AudioBufferSourceNode>();
   readonly history: SoundEvent[] = [];
 
   constructor() {
@@ -44,6 +56,10 @@ class SoundEngine {
 
   setEnabled(value: boolean): void {
     this.enabled = value;
+    if (!value) {
+      for (const source of this.activeSamples) { try { source.stop(); } catch {} }
+      this.activeSamples.clear();
+    }
     try {
       localStorage.setItem(STORAGE_KEY, value ? '1' : '0');
     } catch {
@@ -61,10 +77,41 @@ class SoundEngine {
     if (!this.ctx) {
       this.ctx = new AudioCtx();
     }
+    if (!this.loadingSamples) {
+      this.loadingSamples = true;
+      const ctx = this.ctx;
+      for (const name of Object.keys(SAMPLE_URLS) as SampleName[]) {
+        void fetch(SAMPLE_URLS[name]).then(response => {
+          if (!response.ok) throw new Error('Audio sample unavailable');
+          return response.arrayBuffer();
+        }).then(bytes => ctx.decodeAudioData(bytes)).then(buffer => {
+          this.samples.set(name, buffer);
+        }).catch(() => { /* Keep synthesized fallback when offline. */ });
+      }
+    }
     if (this.ctx.state === 'suspended') {
       void this.ctx.resume().catch(() => {});
     }
     return this.ctx;
+  }
+
+  private sample(name: SampleName, delayMs = 0, volume = 0.65, maxDuration?: number): boolean {
+    const ctx = this.context();
+    const buffer = this.samples.get(name);
+    if (!ctx || !buffer) return false;
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    const gain = ctx.createGain();
+    const start = ctx.currentTime + delayMs / 1000;
+    const duration = Math.min(buffer.duration, maxDuration ?? buffer.duration);
+    gain.gain.setValueAtTime(volume, start);
+    gain.gain.setValueAtTime(volume, start + Math.max(0, duration - 0.015));
+    gain.gain.linearRampToValueAtTime(0, start + duration);
+    source.connect(gain); gain.connect(ctx.destination);
+    this.activeSamples.add(source);
+    source.onended = () => { this.activeSamples.delete(source); source.disconnect(); gain.disconnect(); };
+    source.start(start, 0, duration);
+    return true;
   }
 
   private noiseBuffer(ctx: AudioContext, durationSec: number): AudioBuffer {
@@ -164,6 +211,7 @@ class SoundEngine {
     const ctx = this.context();
     if (!ctx) return;
     this.record('deal');
+    if (this.sample('card', delayMs, 0.65, 0.24)) return;
     this.cardSlide(ctx, ctx.currentTime + delayMs / 1000);
   }
 
@@ -172,6 +220,7 @@ class SoundEngine {
     const ctx = this.context();
     if (!ctx) return;
     this.record('flip');
+    if (this.sample('card', delayMs, 0.75, 0.24)) return;
     this.cardTurn(ctx, ctx.currentTime + delayMs / 1000);
   }
 
@@ -179,7 +228,9 @@ class SoundEngine {
   dealHand(): void {
     if (!this.enabled) return;
     this.record('dealHand');
-    [0, 85, 170, 255].forEach(delay => this.deal(delay));
+    this.sample('nextHand', 0, 0.7, 0.6);
+    this.sample('shuffle', 200, 0.55, 0.6);
+    [700, 850, 1000, 1150].forEach(delay => this.deal(delay));
   }
 
   /** 보드 딜: 화면 연출과 같은 타임라인으로 슬라이드 → 플립 소리를 낸다. */
@@ -204,6 +255,7 @@ class SoundEngine {
     const ctx = this.context();
     if (!ctx) return;
     this.record('muck');
+    if (this.sample('fold', 0, 0.8)) return;
     const t0 = ctx.currentTime;
     this.noise(ctx, t0, 0.14, 'bandpass', 2800, 900, 1.1, 0.13, 0.01);
     this.noise(ctx, t0 + 0.12, 0.04, 'lowpass', 900, 500, 0.8, 0.07, 0.003);
@@ -214,6 +266,11 @@ class SoundEngine {
     const ctx = this.context();
     if (!ctx) return;
     this.record('knock');
+    if (this.samples.has('check')) {
+      this.sample('check', 0, 0.65);
+      this.sample('check', 100, 0.55);
+      return;
+    }
     [0, 0.12].forEach((offset, idx) => {
       const t0 = ctx.currentTime + offset;
       const level = idx === 0 ? 1 : 0.82;
@@ -235,6 +292,7 @@ class SoundEngine {
     const ctx = this.context();
     if (!ctx) return;
     this.record('chipDrop');
+    if (this.sample('bet', 0, 0.65, 0.45)) return;
     const t0 = ctx.currentTime;
     this.chipHit(ctx, t0, 0.14);
     this.chipHit(ctx, t0 + 0.055 + Math.random() * 0.02, 0.11);
@@ -245,6 +303,11 @@ class SoundEngine {
     const ctx = this.context();
     if (!ctx) return;
     this.record('chipStack');
+    if (this.samples.has('bet')) {
+      this.sample('bet', 0, 0.7, 0.35);
+      this.sample('bet', 110, 0.6, 0.35);
+      return;
+    }
     const t0 = ctx.currentTime;
     let offset = 0;
     for (let i = 0; i < 6; i++) {
@@ -258,6 +321,7 @@ class SoundEngine {
     const ctx = this.context();
     if (!ctx) return;
     this.record('chipPush');
+    if (this.sample('allIn', 0, 0.8)) return;
     const t0 = ctx.currentTime;
     this.noise(ctx, t0, 0.5, 'bandpass', 2400, 1800, 0.9, 0.07, 0.04);
     let offset = 0;

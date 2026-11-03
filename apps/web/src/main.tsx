@@ -9,6 +9,7 @@ import { Invitation } from './Invitation';
 import { Card } from './Card';
 import { PokerTableView } from './PokerTableView';
 import { sound } from './sound';
+import { boardTimeline } from './dealTimeline';
 import { serverless } from './serverless';
 import type { User, Table, BountyAward, Review, InvitationInfo } from './types';
 const client=new QueryClient({defaultOptions:{queries:{retry:false}}});
@@ -81,10 +82,12 @@ function App(){
     else if(lastAction==='ALL_IN')sound.allIn();
    }
    const newCards=Math.max(0,t.board.length-prev.board.length);
+   const dealSteps=boardTimeline(prev.board.length,t.board.length);
+   const dealDuration=dealSteps.length?Math.max(...dealSteps.map(s=>s.flipAt))+300:0;
    const cardBaseDelay=actionPlayed?170:0;
-   for(let i=0;i<newCards;i++)sound.cardFlip(cardBaseDelay+i*85,1800+i*140);
+   if(newCards>0)sound.dealBoard(prev.board.length,t.board.length,0);
    if(t.street==='SETTLED'&&prev.street!=='SETTLED'){
-    const settleDelay=cardBaseDelay+newCards*85+(actionPlayed&&newCards===0?40:0);
+    const settleDelay=dealDuration+(actionPlayed&&newCards===0?40:0);
     if(t.bountyAwards.length>0)sound.bounty(settleDelay);
     else{
      const mePrev=prev.players.find(p=>p.id===user.data?.id);
@@ -93,7 +96,7 @@ function App(){
     return;
    }
    if(playing&&me&&t.actor===me.seat&&(prev.actor!==me.seat||prev.street!==t.street)){
-    sound.myTurn(cardBaseDelay+newCards*85+(actionPlayed&&newCards===0?40:0));
+    sound.myTurn(cardBaseDelay+dealDuration+(actionPlayed&&newCards===0?40:0));
    }
    if(!playing){
     const showdownRevealed=t.street==='SETTLED'&&t.players.some(p=>p.showdown&&!prev.players.find(q=>q.id===p.id)?.showdown);

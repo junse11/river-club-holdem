@@ -1,5 +1,7 @@
-import { Card } from './Card';
-import { evaluateHand, handLabel } from './serverless';
+import { useEffect, useState } from 'react';
+import { BoardCard, Card } from './Card';
+import { boardTimeline } from './dealTimeline';
+import { evaluateHand, handLabel } from './engine';
 import type { Table } from './types';
 
 function getCurrentHandBadge(holeCards: string[], board: string[]): string | null {
@@ -36,6 +38,23 @@ export function PokerTableView({ table, userId, now, money, onKick, onTogglePaus
     ? table.log.filter(l => !l.street || l.street === table.street)
     : [];
 
+  // 새로 공개된 보드 카드만 딜러식(뒷면 슬라이드 → 플립) 연출을 적용한다. 최초 로드/재입장 시에는 즉시 표시.
+  const boardLen = table.board.length;
+  const [tracker, setTracker] = useState<{ code: string; hand: number; len: number; anim: { from: number; to: number } | null }>(
+    { code: table.code, hand: table.hand, len: boardLen, anim: null }
+  );
+  if (tracker.code !== table.code || tracker.hand !== table.hand || boardLen < tracker.len) {
+    setTracker({ code: table.code, hand: table.hand, len: boardLen, anim: null });
+  } else if (boardLen > tracker.len) {
+    setTracker({ ...tracker, len: boardLen, anim: { from: tracker.len, to: boardLen } });
+  }
+  useEffect(() => {
+    if (!tracker.anim) return;
+    const timer = setTimeout(() => setTracker(t => ({ ...t, anim: null })), 2600);
+    return () => clearTimeout(timer);
+  }, [tracker.anim]);
+  const dealSteps = tracker.anim ? boardTimeline(tracker.anim.from, tracker.anim.to) : [];
+
   return <>
     <div className="poker-table pn-oval-table" aria-label="6인 포커 테이블">
       <div className="felt pn-oval-felt">
@@ -47,11 +66,11 @@ export function PokerTableView({ table, userId, now, money, onKick, onTogglePaus
         </div>
 
         <div className="board pn-board" aria-label="공용 카드">
-          {Array.from({ length: 5 }, (_, i) =>
-            table.board[i]
-              ? <Card key={i} value={table.board[i]} />
-              : <span className="slot" aria-label="미공개 공용 카드" key={i} />
-          )}
+          {Array.from({ length: 5 }, (_, i) => {
+            if (!table.board[i]) return <span className="slot" aria-label="미공개 공용 카드" key={i} />;
+            const step = dealSteps.find(s => s.index === i);
+            return <BoardCard key={`${table.hand}-${i}-${table.board[i]}`} value={table.board[i]} animate={Boolean(step)} slideAt={step?.slideAt} flipAt={step?.flipAt} />;
+          })}
         </div>
 
         <div className="pn-felt-watermark" aria-hidden="true">

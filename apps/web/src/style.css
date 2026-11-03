@@ -490,3 +490,16 @@ footer{padding:24px 0;text-align:center}
   .pn-raise-actions{gap:5px}
   .pn-back-btn,.pn-confirm-btn{min-height:66px;font-size:12px;border-radius:9px;padding:4px 2px}
 }
+
+/* --- Dealer-style board card reveal (slide face-down, then flip) --- */
+.board-card{display:inline-block;width:72px;height:102px;perspective:800px;flex-shrink:0}
+.board-card-inner{position:relative;display:block;width:100%;height:100%;transform-style:preserve-3d}
+.board-card-face{position:absolute;inset:0;display:block;backface-visibility:hidden;-webkit-backface-visibility:hidden}
+.board-card-face .card{width:100%;height:100%}
+.board-card-back{transform:rotateY(180deg)}
+.board-card.dealing .board-card-inner{animation:dealFlip .46s cubic-bezier(.4,.1,.3,1) var(--flip-at,0ms) both}
+.board-card.dealing{animation:dealSlide .28s ease-out var(--slide-at,0ms) both}
+@keyframes dealSlide{from{opacity:0;transform:translate(0,-150px) rotate(-10deg) scale(.88)}to{opacity:1;transform:none}}
+@keyframes dealFlip{from{transform:rotateY(180deg)}to{transform:rotateY(0)}}
+@media(prefers-reduced-motion:reduce){.board-card.dealing,.board-card.dealing .board-card-inner{animation:none}}
+@media(max-width:650px){.board-card{width:40px;height:56px}}

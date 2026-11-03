@@ -119,6 +119,7 @@ export class LocalPokerTable {
   street = 'WAITING';
   result = '';
   resetPending = false;
+  allInShowdown = false;
   bountyAwards: BountyAward[] = [];
   password = '';
   updatedAt = Date.now();
@@ -162,6 +163,7 @@ export class LocalPokerTable {
       street: this.street,
       result: this.result,
       resetPending: this.resetPending,
+      allInShowdown: this.allInShowdown,
       bountyAwards: this.bountyAwards,
       updatedAt: this.updatedAt,
     };
@@ -214,6 +216,7 @@ export class LocalPokerTable {
     t.street = String(raw.street ?? 'WAITING');
     t.result = String(raw.result ?? '');
     t.resetPending = Boolean(raw.resetPending);
+    t.allInShowdown = Boolean(raw.allInShowdown);
     t.bountyAwards = Array.isArray(raw.bountyAwards) ? (raw.bountyAwards as BountyAward[]) : [];
     t.updatedAt = Number(raw.updatedAt ?? now);
     return t;
@@ -373,6 +376,7 @@ export class LocalPokerTable {
     this.log = [];
     this.bountyAwards = [];
     this.result = '';
+    this.allInShowdown = false;
     this.currentBet = 0;
     this.lastRaise = this.bb;
     this.pending.clear();
@@ -521,6 +525,8 @@ export class LocalPokerTable {
       return;
     }
     if (capable.length <= 1) {
+      this.allInShowdown = true;
+      for (const p of alive) p.showdown = true;
       if (this.street === 'RIVER') {
         this.settle();
         return;
@@ -548,6 +554,7 @@ export class LocalPokerTable {
     if (!this.running()) return;
     this.runoutAt = 0;
     const aliveAtEnd = this.players.filter(p => p.inHand && !p.folded);
+    if (aliveAtEnd.length >= 2 && aliveAtEnd.every(p => p.stack === 0)) this.allInShowdown = true;
     const isForcedShowdown = aliveAtEnd.length >= 2;
     const showdownWinners = new Set<string>();
     const lastPotWinners = new Map<string, InternalPlayer[]>();
@@ -581,7 +588,7 @@ export class LocalPokerTable {
     }
     const winnerNames = [...new Set(payouts.filter(p => p.rank !== 'Uncalled bet').map(p => p.nickname))];
     this.result = winnerNames.length
-      ? `${winnerNames.join(' · ')} 승리${isForcedShowdown ? ' (승자 핸드 강제 쇼다운)' : ' (폴드 승리 · 쇼다운 없음)'}`
+      ? `${winnerNames.join(' · ')} 승리${this.allInShowdown ? ' (올인 · 남은 플레이어 전원 쇼다운)' : isForcedShowdown ? ' (승자 핸드 강제 쇼다운)' : ' (폴드 승리 · 쇼다운 없음)'}`
       : '';
     const awards: BountyAward[] = [];
     // 바운티 규칙: 쇼다운에서 패가 가장 강한 1등(동점이면 균등 분배)만 탈락자의 바운티를 획득한다.
@@ -626,7 +633,7 @@ export class LocalPokerTable {
     for (const p of this.players) {
       p.bet = 0;
       p.committed = 0;
-      p.showdown = isForcedShowdown && showdownWinners.has(p.id);
+      p.showdown = isForcedShowdown && ((this.allInShowdown && !p.folded && p.inHand) || showdownWinners.has(p.id));
     }
     this.street = 'SETTLED';
     this.actor = -1;
@@ -639,10 +646,56 @@ export class LocalPokerTable {
     this.req(this.street === 'SETTLED', '핸드 종료 후에만 쇼다운 여부를 선택할 수 있습니다');
     const p = this.member(id);
     this.req(p.cards.length > 0, '공개할 홀 카드가 없습니다');
+    this.req(!this.allInShowdown || reveal, '올인 쇼다운에서는 패를 숨길 수 없습니다');
     p.showdown = reveal;
     if (reveal && !this.paused && this.nextHandAt > 0) {
       this.nextHandAt = Math.max(this.nextHandAt, Date.now() + 3000);
     }
+    this.version++;
+  }
+
+  resetStacks(hostId: string): void {
+    this.req(this.host === hostId, '방장만 칩을 초기화할 수 있습니다');
+    this.member(hostId);
+    this.street = 'WAITING';
+    this.cleanup();
+    for (const p of this.players) {
+      p.stack = 100 * this.bb;
+      p.bet = 0;
+      p.committed = 0;
+      p.cards = [];
+      p.ready = false;
+      p.inHand = false;
+      p.folded = false;
+      p.showdown = false;
+      p.lastActedAt = -1;
+    }
+    this.board = [];
+    this.deck = [];
+    this.pending.clear();
+    this.actor = -1;
+    this.currentBet = 0;
+    this.lastRaise = this.bb;
+    this.deadline = this.runoutAt = this.nextHandAt = 0;
+    this.pausedDeadlineRem = this.pausedRunoutRem = this.pausedNextHandRem = 0;
+    this.resetPending = false;
+    this.allInShowdown = false;
+    this.bountyAwards = [];
+    this.log = [];
+    this.result = '방장이 진행 중인 핸드를 취소하고 전원을 100BB로 초기화했습니다. 다시 준비해주세요.';
+    this.chat(hostId, '[운영 기록] 전원 100BB 초기화 · 진행 중 핸드 취소 · 바운티 유지');
+    this.version++;
+  }
+
+  resetBounties(hostId: string): void {
+    this.req(this.host === hostId, '방장만 바운티를 초기화할 수 있습니다');
+    this.member(hostId);
+    for (const p of [...this.players, ...this.archivedPlayers]) {
+      p.bountyUnits = 0;
+      p.bountyLog = [];
+    }
+    this.bountyAwards = [];
+    this.chat(hostId, '[운영 기록] 전원 바운티 0점 초기화 · 현재 핸드와 칩 유지');
     this.version++;
   }
 
@@ -830,6 +883,7 @@ export class LocalPokerTable {
       bountyAwards: this.bountyAwards,
       pendingBlinds: this.pendingSb === null ? [] : [this.pendingSb, this.pendingBb!],
       allowedActions: this.allowed(userId),
+      allInShowdown: this.allInShowdown,
       log: [...this.log],
       chat: [...this.chatLog],
       players: this.players.map((p): Player => ({
@@ -845,7 +899,7 @@ export class LocalPokerTable {
         folded: p.folded,
         showdown: p.showdown,
         position: p.position,
-        cards: p.id === userId || (this.street === 'SETTLED' && p.showdown) ? [...p.cards] : [],
+        cards: p.id === userId || (p.showdown && !p.folded && (this.street === 'SETTLED' || this.allInShowdown)) ? [...p.cards] : [],
         cardCount: p.cards.length,
       })),
     };

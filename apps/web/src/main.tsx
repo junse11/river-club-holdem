@@ -86,6 +86,8 @@ function App(){
    const dealDuration=dealSteps.length?Math.max(...dealSteps.map(s=>s.flipAt))+300:0;
    const cardBaseDelay=actionPlayed?170:0;
    if(newCards>0)sound.dealBoard(prev.board.length,t.board.length,0);
+   const newlyRevealed=t.players.filter(p=>p.showdown&&!p.folded&&!prev.players.find(q=>q.id===p.id)?.showdown);
+   if(newlyRevealed.length>0){sound.cardFlip(0);sound.cardFlip(75);}
    if(t.street==='SETTLED'&&prev.street!=='SETTLED'){
     const settleDelay=dealDuration+(actionPlayed&&newCards===0?40:0);
     if(t.bountyAwards.length>0)sound.bounty(settleDelay);
@@ -99,8 +101,6 @@ function App(){
     sound.myTurn(cardBaseDelay+dealDuration+(actionPlayed&&newCards===0?40:0));
    }
    if(!playing){
-    const showdownRevealed=t.street==='SETTLED'&&t.players.some(p=>p.showdown&&!prev.players.find(q=>q.id===p.id)?.showdown);
-    if(showdownRevealed){sound.cardFlip(0,1850);sound.cardFlip(75,2100);}
     const readyChanged=t.players.some(p=>p.ready!==prev.players.find(q=>q.id===p.id)?.ready);
     if(t.players.length>prev.players.length||readyChanged)sound.ready();
    }
@@ -143,6 +143,14 @@ function App(){
 
   <div className="layout pn-main-layout">
    <section className="table-column pn-table-area">
+    {t.host===user.data?.id&&<div className="table-reset-controls" aria-label="방장 초기화 관리">
+      <button type="button" className="danger" disabled={busy} onClick={()=>{
+        if(window.confirm('전원을 지금 100BB로 초기화할까요?\n진행 중인 핸드와 팟은 취소되며 바운티 점수는 유지됩니다.\n다시 준비한 뒤 방장이 시작해야 합니다.'))void run(()=>update('reset-stacks',{confirmed:true}));
+      }}>전원 100BB 초기화</button>
+      <button type="button" className="danger" disabled={busy} onClick={()=>{
+        if(window.confirm('모든 플레이어의 바운티를 지금 0점으로 초기화할까요?\n퇴장한 플레이어의 점수와 획득 칩 내역도 초기화됩니다.\n현재 핸드와 보유 칩은 유지됩니다.'))void run(()=>update('reset-bounties',{confirmed:true}));
+      }}>바운티 초기화</button>
+    </div>}
     <PokerTableView table={t} userId={user.data?.id} now={now} money={money} busy={busy} onTogglePause={t.host===user.data?.id?()=>void run(()=>update('pause')):undefined} onKick={t.host===user.data?.id?(targetId)=>void run(()=>update('kick',{userId:targetId})):undefined}/>
 
     <div className="pn-bottom-bar">
@@ -185,8 +193,8 @@ function App(){
         </div>
         <div className="pn-waiting-btns">
          {t.street==='SETTLED'&&me&&me.cardCount>0&&(
-          <button type="button" className={`pn-btn pn-showdown-btn ${me.showdown?'active':''}`} disabled={busy} onClick={()=>void run(()=>update('showdown',{showdown:!me.showdown}))}>
-           {me.showdown?'🙈 패 숨기기':'🃏 쇼다운 공개'}
+          <button type="button" className={`pn-btn pn-showdown-btn ${me.showdown?'active':''}`} disabled={busy||t.allInShowdown} onClick={()=>void run(()=>update('showdown',{showdown:!me.showdown}))}>
+           {t.allInShowdown?'🃏 올인 자동 공개':me.showdown?'🙈 패 숨기기':'🃏 쇼다운 공개'}
           </button>
          )}
          <button type="button" className="pn-btn pn-call" disabled={busy||!me||(me.stack===0&&!t.resetPending)} onClick={()=>void run(()=>update('ready',{ready:!me?.ready}))}>

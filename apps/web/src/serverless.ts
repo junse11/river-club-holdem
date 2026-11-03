@@ -628,6 +628,13 @@ class ServerlessCoordinator {
         this.broadcastTableUpdate(code);
         return { id: req.id, ok: true, data: t.view(req.userId) };
       }
+      if (sub === '/reset-stacks' || sub === '/reset-bounties') {
+        if (body.confirmed !== true) throw new Error('초기화를 재확인해주세요');
+        if (sub === '/reset-stacks') t.resetStacks(req.userId);
+        else t.resetBounties(req.userId);
+        this.broadcastTableUpdate(code);
+        return { id: req.id, ok: true, data: t.view(req.userId) };
+      }
       if (sub === '/pause') {
         t.pause(req.userId);
         this.broadcastTableUpdate(code);

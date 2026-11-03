@@ -503,3 +503,5 @@ footer{padding:24px 0;text-align:center}
 @keyframes dealFlip{from{transform:rotateY(180deg)}to{transform:rotateY(0)}}
 @media(prefers-reduced-motion:reduce){.board-card.dealing,.board-card.dealing .board-card-inner{animation:none}}
 @media(max-width:650px){.board-card{width:40px;height:56px}}
+.table-reset-controls{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin:0 0 8px}
+.table-reset-controls button{font-size:12px;padding:6px 10px}

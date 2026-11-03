@@ -30,6 +30,50 @@ const total = (t: LocalPokerTable) => t.players.reduce((s, p) => s + p.stack, 0)
 const BOARD = ['2C', '7D', '9H', '11S', '13C'];
 const byId = (t: LocalPokerTable, id: string) => t.players.find(p => p.id === id)!;
 
+describe('운영자 즉시 초기화', () => {
+  it('핸드 중 칩 초기화는 팟을 취소하고 바운티를 보존한다', () => {
+    const t = setup([{ id: 'host', stack: 1200, committed: 300, cards: ['14H', '14D'] }, { id: 'guest', stack: 900, committed: 600, cards: ['13H', '13D'] }], BOARD);
+    t.players[0].bountyUnits = BOUNTY_UNITS;
+    t.pending.add('guest'); t.actor = 1; t.deadline = Date.now() + 30000;
+    t.runoutAt = Date.now() + 1000; t.nextHandAt = Date.now() + 5000;
+    t.paused = true; t.pausedDeadlineRem = 10000; t.pausedRunoutRem = 1000; t.pausedNextHandRem = 5000;
+    t.pendingBb = 200; t.pendingSb = 100; t.resetPending = true;
+    t.resetStacks('host');
+    expect(t.street).toBe('WAITING');
+    expect(t.players.every(p => p.stack === 10000 && p.bet === 0 && p.committed === 0 && p.cards.length === 0 && !p.ready && !p.inHand)).toBe(true);
+    expect(t.players[0].bountyUnits).toBe(BOUNTY_UNITS);
+    expect([t.deadline,t.runoutAt,t.nextHandAt,t.pausedDeadlineRem,t.pausedRunoutRem,t.pausedNextHandRem]).toEqual([0,0,0,0,0,0]);
+    expect(t.pending.size).toBe(0); expect(t.actor).toBe(-1); expect(t.board).toEqual([]);
+    expect(t.resetPending).toBe(false); expect(t.paused).toBe(true); expect(t.pendingBb).toBe(200);
+    expect(t.tick(Date.now()+60000)).toBe(false);
+    const restored = LocalPokerTable.fromJSON(t.toJSON());
+    expect(restored.players[0].stack).toBe(10000);
+    expect(restored.players[0].bountyUnits).toBe(BOUNTY_UNITS);
+  });
+
+  it('바운티 초기화는 현재 핸드를 유지하고 퇴장자의 점수도 지운다', () => {
+    const t = setup([{ id: 'host', stack: 1200, committed: 300, cards: ['14H', '14D'] }, { id: 'guest', stack: 900, committed: 600, cards: ['13H', '13D'] }], BOARD);
+    t.players[0].bountyUnits = BOUNTY_UNITS;
+    t.players[0].bountyLog = [{ victimNickname: 'guest', units: BOUNTY_UNITS }];
+    t.archivedPlayers = [{ ...t.players[0], id: 'old' }];
+    t.deadline = 12345; t.actor = 1;
+    const before = t.toJSON();
+    t.resetBounties('host');
+    expect([...t.players,...t.archivedPlayers].every(p => p.bountyUnits === 0 && p.bountyLog.length === 0)).toBe(true);
+    expect(t.board).toEqual(before.board); expect(t.street).toBe('RIVER');
+    expect(t.players[0].stack).toBe(1200); expect(t.players[0].committed).toBe(300);
+    expect(t.players[0].cards).toEqual(['14H','14D']); expect(t.deadline).toBe(12345); expect(t.actor).toBe(1);
+  });
+
+  it('일반 참가자의 초기화는 상태를 바꾸지 않는다', () => {
+    const t = setup([{ id: 'host', stack: 1200, committed: 300, cards: ['14H', '14D'] }, { id: 'guest', stack: 900, committed: 600, cards: ['13H', '13D'] }], BOARD);
+    const before = JSON.stringify(t.toJSON());
+    expect(() => t.resetStacks('guest')).toThrow('방장만');
+    expect(() => t.resetBounties('guest')).toThrow('방장만');
+    expect(JSON.stringify(t.toJSON())).toBe(before);
+  });
+});
+
 describe('핸드 평가 (ENG-001~006)', () => {
   it('9개 족보가 오름차순으로 평가된다', () => {
     const hands = [
@@ -210,6 +254,42 @@ describe('바운티 규칙: 쇼다운 1등만 획득 (BNT)', () => {
 });
 
 describe('쇼다운 / 일시정지 / 권한', () => {
+  it('마지막 올인 콜 직후 폴드한 사람을 제외하고 보드가 깔리기 전에 패를 공개한다', () => {
+    const t = setup([
+      { id: 'A', stack: 100, committed: 0, cards: ['14H', '14S'] },
+      { id: 'B', stack: 0, committed: 100, cards: ['12H', '12S'] },
+      { id: 'C', stack: 900, committed: 100, cards: ['6H', '6S'], folded: true },
+    ], []);
+    t.street = 'PREFLOP'; t.actor = 0; t.currentBet = 100; t.players[1].bet = 100;
+    t.pending.add('A');
+    t.deck = ['3C','2C','7D','9H','4D','11S','5D','13C'];
+    t.action('A', 'CALL', undefined, t.version, t.hand);
+    expect(t.board).toEqual([]); expect(t.actor).toBe(-1); expect(t.runoutAt).toBeGreaterThan(0);
+    expect(t.view('C').players.find(p=>p.id==='A')?.cards).toEqual(['14H','14S']);
+    expect(t.view('A').players.find(p=>p.id==='B')?.cards).toEqual(['12H','12S']);
+    expect(t.view('A').players.find(p=>p.id==='C')?.cards).toEqual([]);
+    const restored = LocalPokerTable.fromJSON(t.toJSON());
+    expect(restored.view('A').players.find(p=>p.id==='B')?.cards).toEqual(['12H','12S']);
+    for (let i=0;i<4;i++) t.tick(t.runoutAt+1);
+    expect(t.street).toBe('SETTLED'); expect(t.board).toHaveLength(5);
+    expect(t.view('A').players.find(p=>p.id==='B')?.cards).toEqual(['12H','12S']);
+    expect(() => t.showdown('B',false)).toThrow();
+  });
+
+  it('콜 또는 폴드할 플레이어가 남아 있으면 올인 패를 미리 공개하지 않는다', () => {
+    const t = setup([
+      { id: 'A', stack: 100, committed: 0, cards: ['14H','14S'] },
+      { id: 'B', stack: 0, committed: 100, cards: ['12H','12S'] },
+      { id: 'C', stack: 900, committed: 0, cards: ['6H','6S'] },
+    ], []);
+    t.street='PREFLOP'; t.actor=0; t.currentBet=100; t.players[1].bet=100;
+    t.pending.add('A'); t.pending.add('C');
+    t.action('A','CALL',undefined,t.version,t.hand);
+    expect(t.runoutAt).toBe(0);
+    expect(t.view('C').players.find(p=>p.id==='A')?.cards).toEqual([]);
+    expect(t.view('C').players.find(p=>p.id==='B')?.cards).toEqual([]);
+  });
+
   it('SHD-001: 2인 이상 베팅 종료 시 이긴 사람이 강제 쇼다운된다', () => {
     const t = setup([
       { id: 'A', stack: 0, committed: 100, cards: ['14H', '14S'] },

@@ -116,7 +116,7 @@ export function PokerTableView({ table, userId, now, money, onKick, onTogglePaus
         const isAllIn = Boolean(p && p.stack === 0 && playing && !p.folded);
         const hasBet = Boolean(p && p.bet > 0);
         const isTopBet = Boolean(playing && p && table.currentBet > 0 && p.bet === table.currentBet);
-        const isShowdownRevealed = Boolean(table.street === 'SETTLED' && p?.showdown);
+        const isShowdownRevealed = Boolean(p?.showdown && !p.folded);
         const lastPlayerAct = p ? [...streetLogs].reverse().find(l => l.nickname === p.nickname) : undefined;
         const handBadge = p && (!p.folded || !playing) ? getCurrentHandBadge(p.cards, table.board) : null;
         const bountyVictimsText = p?.bountyVictims?.length

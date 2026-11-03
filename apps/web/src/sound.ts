@@ -23,9 +23,8 @@ class SoundEngine {
     if (typeof window !== 'undefined') {
       (window as unknown as { __riverSound?: SoundEngine }).__riverSound = this;
       const unlock = () => {
-        if (this.ctx && this.ctx.state === 'suspended') {
-          void this.ctx.resume();
-        }
+        // Create/resume inside the trusted gesture, before remote game updates arrive.
+        this.context();
       };
       window.addEventListener('pointerdown', unlock, { passive: true });
       window.addEventListener('keydown', unlock, { passive: true });
@@ -63,7 +62,7 @@ class SoundEngine {
       this.ctx = new AudioCtx();
     }
     if (this.ctx.state === 'suspended') {
-      void this.ctx.resume();
+      void this.ctx.resume().catch(() => {});
     }
     return this.ctx;
   }
@@ -129,16 +128,16 @@ class SoundEngine {
 
   /** 세라믹 칩 한 번 부딪히는 소리(클릭 + 비조화 배음). */
   private chipHit(ctx: AudioContext, t0: number, volume = 0.1): void {
-    const base = jitter(3100, 0.1);
-    this.noise(ctx, t0, 0.03, 'highpass', 4200, 4200, 0.7, volume * 1.1, 0.0015);
-    [base, base * 1.51, base * 2.17].forEach((freq, idx) => {
+    const base = jitter(1900, 0.08);
+    this.noise(ctx, t0, 0.022, 'bandpass', 3800, 2400, 0.8, volume * 1.4, 0.001);
+    [base, base * 1.47, base * 2.09].forEach((freq, idx) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
       osc.frequency.setValueAtTime(freq, t0);
       gain.gain.setValueAtTime(0.0008, t0);
       gain.gain.linearRampToValueAtTime((volume * 0.55) / (idx + 1), t0 + 0.002);
-      gain.gain.exponentialRampToValueAtTime(0.0008, t0 + 0.05 + (idx === 0 ? 0.02 : 0));
+      gain.gain.exponentialRampToValueAtTime(0.0008, t0 + 0.028 + (idx === 0 ? 0.016 : 0));
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start(t0);
@@ -149,14 +148,14 @@ class SoundEngine {
 
   /** 카드 한 장이 펠트 위로 미끄러지는 소리. */
   private cardSlide(ctx: AudioContext, t0: number, volume = 0.13): void {
-    this.noise(ctx, t0, 0.095, 'bandpass', jitter(3600, 0.08), 1500, 1.3, volume, 0.012);
-    this.noise(ctx, t0 + 0.07, 0.03, 'lowpass', 700, 400, 0.8, volume * 0.55, 0.002);
+    this.noise(ctx, t0, 0.16, 'bandpass', jitter(4200, 0.08), 1800, 0.8, volume * 1.35, 0.012);
+    this.noise(ctx, t0 + 0.11, 0.045, 'lowpass', 1100, 500, 0.8, volume * 0.8, 0.002);
   }
 
   /** 카드 들어 올려 뒤집어 놓는 소리("슥" → "탁"). */
   private cardTurn(ctx: AudioContext, t0: number, volume = 0.16): void {
-    this.noise(ctx, t0, 0.07, 'bandpass', 1600, 3600, 1.6, volume * 0.75, 0.02);
-    this.noise(ctx, t0 + 0.065, 0.028, 'bandpass', jitter(2500, 0.1), 1200, 1.4, volume, 0.001);
+    this.noise(ctx, t0, 0.09, 'bandpass', 1800, 4500, 0.85, volume, 0.012);
+    this.noise(ctx, t0 + 0.085, 0.035, 'bandpass', jitter(3000, 0.1), 1200, 0.8, volume * 1.25, 0.001);
     this.thump(ctx, t0 + 0.065, jitter(330, 0.1), 150, 0.03, volume * 0.5);
   }
 
@@ -188,7 +187,7 @@ class SoundEngine {
     if (!this.enabled) return;
     const steps = boardTimeline(prevLen, nextLen);
     if (steps.length === 0) return;
-    this.record(steps.length >= 3 ? 'flop' : 'board');
+    this.record(steps.length >= 3 ? 'flop' : nextLen === 4 ? 'turn' : 'river');
     steps.forEach(step => {
       this.deal(baseDelayMs + step.slideAt);
       this.cardFlip(baseDelayMs + step.flipAt);
@@ -237,8 +236,8 @@ class SoundEngine {
     if (!ctx) return;
     this.record('chipDrop');
     const t0 = ctx.currentTime;
-    this.chipHit(ctx, t0, 0.1);
-    this.chipHit(ctx, t0 + 0.055 + Math.random() * 0.02, 0.08);
+    this.chipHit(ctx, t0, 0.14);
+    this.chipHit(ctx, t0 + 0.055 + Math.random() * 0.02, 0.11);
   }
 
   /** 베트/레이즈: 칩 여러 개를 쌓아 밀어 넣는 소리. */
@@ -249,7 +248,7 @@ class SoundEngine {
     const t0 = ctx.currentTime;
     let offset = 0;
     for (let i = 0; i < 6; i++) {
-      this.chipHit(ctx, t0 + offset, 0.075 + Math.random() * 0.035);
+      this.chipHit(ctx, t0 + offset, 0.10 + Math.random() * 0.035);
       offset += 0.035 + Math.random() * 0.03;
     }
   }
@@ -263,7 +262,7 @@ class SoundEngine {
     this.noise(ctx, t0, 0.5, 'bandpass', 2400, 1800, 0.9, 0.07, 0.04);
     let offset = 0;
     for (let i = 0; i < 12; i++) {
-      this.chipHit(ctx, t0 + offset, 0.07 + Math.random() * 0.05);
+      this.chipHit(ctx, t0 + offset, 0.09 + Math.random() * 0.05);
       offset += 0.022 + Math.random() * 0.032;
     }
     this.thump(ctx, t0 + 0.05, 110, 55, 0.18, 0.12);

@@ -10,6 +10,8 @@ const param = () => ({
 const node = () => ({ connect() {}, start() {}, stop() {}, frequency: param(), gain: param(), Q: param(), type: '' });
 
 class FakeAudioContext {
+  static created = 0;
+  constructor() { FakeAudioContext.created++; }
   currentTime = 0;
   sampleRate = 8000;
   state = 'running';
@@ -24,16 +26,24 @@ class FakeAudioContext {
 
 type SoundApi = typeof import('./sound')['sound'];
 let sound: SoundApi;
+const gestures = new Map<string, () => void>();
 const last = () => sound.history.map(e => e.type);
 
 beforeAll(async () => {
   const store = new Map<string, string>();
   vi.stubGlobal('localStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) });
-  vi.stubGlobal('window', { AudioContext: FakeAudioContext, addEventListener() {} });
+  vi.stubGlobal('window', { AudioContext: FakeAudioContext, addEventListener(name: string, callback: () => void) { gestures.set(name, callback); } });
   sound = (await import('./sound')).sound;
 });
 
 describe('액션 사운드 이벤트 (AUD-001)', () => {
+  it('첫 터치에서 오디오를 준비하고 이후 입력으로 컨텍스트를 중복 생성하지 않는다', () => {
+    expect(FakeAudioContext.created).toBe(0);
+    gestures.get('pointerdown')!();
+    expect(FakeAudioContext.created).toBe(1);
+    gestures.get('keydown')!();
+    expect(FakeAudioContext.created).toBe(1);
+  });
   it('액션별로 포커에 맞는 사운드가 재생된다', () => {
     sound.history.length = 0;
     sound.check();
@@ -46,6 +56,16 @@ describe('액션 사운드 이벤트 (AUD-001)', () => {
 });
 
 describe('보드 딜 타임라인 (AUD-002/003)', () => {
+  it('플랍·턴·리버 각각 카드 소리가 나고 칩 소리는 섞이지 않는다', () => {
+    for (const [from,to,event] of [[0,3,'flop'],[3,4,'turn'],[4,5,'river']] as const) {
+      sound.history.length=0;
+      sound.dealBoard(from,to);
+      expect(last()[0]).toBe(event);
+      expect(last().filter(t=>t==='deal')).toHaveLength(to-from);
+      expect(last().filter(t=>t==='flip')).toHaveLength(to-from);
+      expect(last().some(t=>t.startsWith('chip'))).toBe(false);
+    }
+  });
   it('플랍: 슬라이드 3회가 먼저, 이후 플립이 순차로 이어진다', () => {
     const steps = boardTimeline(0, 3);
     expect(steps).toHaveLength(3);
